@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from typing import Iterable
+import xml.etree.ElementTree as ET
 
 
 APP_NAME = "Claude"
@@ -34,6 +35,14 @@ APPINFO_SERVICE = "Appinfo"
 APPMODEL_LOG = "Microsoft-Windows-AppModel-Runtime/Admin"
 APP_ERROR_IDS = (208, 215)
 SHARE_VIOLATION_HEX = "0x80070020"
+SHARE_VIOLATION_DECIMAL = "2147942432"
+AUTO_RECOVERY_TASK_NAME = "Claude AppX Auto-Recovery"
+AUTO_RECOVERY_APPLICATION = f"{EXPECTED_PACKAGE_FAMILY}!Claude"
+AUTO_RECOVERY_XPATH = (
+    "*[System[Provider[@Name='Microsoft-Windows-AppModel-Runtime'] and EventID=208] "
+    "and EventData[Data[@Name='ApplicationName']='Claude_pzs8sxrjxfjjc!Claude' "
+    "and Data[@Name='ErrorCode']='2147942432']]"
+)
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 OBJECT_NAME_INFORMATION = 1
 JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
@@ -163,7 +172,8 @@ class Reporter:
     def emit(self, state: str, message: str) -> None:
         line = f"[{state}] {message}"
         self.lines.append(line)
-        print(line, flush=True)
+        if sys.stdout is not None:
+            print(line, flush=True)
 
     def save(self) -> Path:
         target = Path(__file__).resolve().with_name("last-run.log")
@@ -833,6 +843,244 @@ def _ps_single_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _event_parts(xml_text: str) -> tuple[str, int | None, int | None, dict[str, str]]:
+    root = ET.fromstring(xml_text)
+    namespace = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
+    provider = root.find("./e:System/e:Provider", namespace)
+    event_id = root.findtext("./e:System/e:EventID", default="", namespaces=namespace)
+    record_id = root.findtext("./e:System/e:EventRecordID", default="", namespaces=namespace)
+    data = {
+        str(node.attrib.get("Name", "")): str(node.text or "")
+        for node in root.findall("./e:EventData/e:Data", namespace)
+    }
+    return (
+        "" if provider is None else str(provider.attrib.get("Name", "")),
+        int(event_id) if event_id.isdigit() else None,
+        int(record_id) if record_id.isdigit() else None,
+        data,
+    )
+
+
+def is_auto_recovery_event(xml_text: str) -> bool:
+    """Return True only for the structured Claude 0x80070020 launch failure."""
+    try:
+        provider, event_id, _record_id, data = _event_parts(xml_text)
+    except (ET.ParseError, ValueError):
+        return False
+    return (
+        provider == "Microsoft-Windows-AppModel-Runtime"
+        and event_id == 208
+        and data.get("ApplicationName") == AUTO_RECOVERY_APPLICATION
+        and data.get("ErrorCode") == SHARE_VIOLATION_DECIMAL
+    )
+
+
+def build_task_action(python_executable: Path, script_path: Path) -> str:
+    return (
+        f'"{python_executable}" "{script_path}" '
+        "--event-triggered --yes --wait 30"
+    )
+
+
+def auto_recovery_events(
+    package: PackageInfo | None = None,
+    *,
+    minutes: int = 180,
+) -> list[dict[str, object]]:
+    if minutes < 1 or minutes > 10080:
+        raise RecoveryError("Trace window must be between 1 minute and 7 days.")
+    xpath = _ps_single_quote(AUTO_RECOVERY_XPATH)
+    log_name = _ps_single_quote(APPMODEL_LOG)
+    script = f"""
+$cutoff = (Get-Date).AddMinutes(-{minutes})
+$result = @(
+    Get-WinEvent -LogName {log_name} -FilterXPath {xpath} -ErrorAction SilentlyContinue |
+    Where-Object TimeCreated -ge $cutoff |
+    ForEach-Object {{
+        [pscustomobject]@{{
+            RecordId = [long]$_.RecordId
+            TimeCreated = $_.TimeCreated.ToString('o')
+            Xml = $_.ToXml()
+        }}
+    }}
+)
+ConvertTo-Json -InputObject @($result) -Compress -Depth 4
+"""
+    raw = _run_powershell(script, timeout=30)
+    rows = json.loads(raw) if raw else []
+    if isinstance(rows, dict):
+        rows = [rows]
+    events: list[dict[str, object]] = []
+    for row in rows:
+        xml_text = str(row.get("Xml") or "")
+        if not is_auto_recovery_event(xml_text):
+            continue
+        _provider, _event_id, record_id, data = _event_parts(xml_text)
+        if package is not None and data.get("PackageName") != package.package_full_name:
+            continue
+        events.append(
+            {
+                "record_id": record_id,
+                "time_created": str(row.get("TimeCreated") or ""),
+                "package_name": data.get("PackageName", ""),
+                "application_name": data.get("ApplicationName", ""),
+                "error_code": data.get("ErrorCode", ""),
+            }
+        )
+    return events
+
+
+def trace_auto_recovery_events(reporter: Reporter, minutes: int) -> int:
+    package = get_claude_package()
+    events = auto_recovery_events(package, minutes=minutes)
+    if not events:
+        reporter.emit(
+            "TRACE CLEAR",
+            f"No structured Claude {SHARE_VIOLATION_HEX} launch failures in the last {minutes} minute(s).",
+        )
+        return 0
+    reporter.emit(
+        "TRACE RED",
+        f"Windows recorded {len(events)} structured Claude {SHARE_VIOLATION_HEX} launch failure(s) "
+        f"in the last {minutes} minute(s).",
+    )
+    for event in events[:20]:
+        reporter.emit(
+            "EVENT",
+            f"Record {event['record_id']} at {event['time_created']}: Event 208, "
+            f"{event['application_name']}, error {event['error_code']}.",
+        )
+    return 10
+
+
+def _task_python_executable() -> Path:
+    executable = Path(sys.executable).resolve()
+    pythonw = executable.with_name("pythonw.exe")
+    return pythonw if pythonw.is_file() else executable
+
+
+def automation_task_status() -> dict[str, object]:
+    task_name = _ps_single_quote(AUTO_RECOVERY_TASK_NAME)
+    script = f"""
+$task = Get-ScheduledTask -TaskName {task_name} -ErrorAction SilentlyContinue
+if (-not $task) {{
+    [pscustomobject]@{{ Installed = $false }} | ConvertTo-Json -Compress
+    return
+}}
+$info = Get-ScheduledTaskInfo -TaskName {task_name} -ErrorAction SilentlyContinue
+$trigger = @($task.Triggers)[0]
+$action = @($task.Actions)[0]
+[pscustomobject]@{{
+    Installed = $true
+    State = $task.State.ToString()
+    MultipleInstances = $task.Settings.MultipleInstances.ToString()
+    LogonType = $task.Principal.LogonType.ToString()
+    RunLevel = $task.Principal.RunLevel.ToString()
+    Subscription = [string]$trigger.Subscription
+    Execute = [string]$action.Execute
+    Arguments = [string]$action.Arguments
+    LastRunTime = if ($info) {{ $info.LastRunTime.ToString('o') }} else {{ '' }}
+    LastTaskResult = if ($info) {{ $info.LastTaskResult }} else {{ $null }}
+}} | ConvertTo-Json -Compress -Depth 4
+"""
+    raw = _run_powershell(script)
+    return dict(json.loads(raw))
+
+
+def install_auto_recovery(reporter: Reporter) -> None:
+    package = get_claude_package()
+    script_path = Path(__file__).resolve()
+    python_executable = _task_python_executable()
+    action = build_task_action(python_executable, script_path)
+    command = [
+        "schtasks.exe",
+        "/Create",
+        "/TN",
+        AUTO_RECOVERY_TASK_NAME,
+        "/TR",
+        action,
+        "/SC",
+        "ONEVENT",
+        "/EC",
+        APPMODEL_LOG,
+        "/MO",
+        AUTO_RECOVERY_XPATH,
+        "/RL",
+        "HIGHEST",
+        "/IT",
+        "/F",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RecoveryError(f"Could not register {AUTO_RECOVERY_TASK_NAME}: {detail}")
+
+    status = automation_task_status()
+    expected_arguments = f'"{script_path}" --event-triggered --yes --wait 30'
+    valid = (
+        status.get("Installed") is True
+        and status.get("MultipleInstances") == "IgnoreNew"
+        and status.get("LogonType") in ("Interactive", "InteractiveToken")
+        and status.get("RunLevel") in ("Highest", "HighestAvailable")
+        and status.get("Subscription")
+        and AUTO_RECOVERY_APPLICATION in str(status.get("Subscription"))
+        and SHARE_VIOLATION_DECIMAL in str(status.get("Subscription"))
+        and os.path.normcase(str(status.get("Execute")).strip('"'))
+        == os.path.normcase(str(python_executable))
+        and str(status.get("Arguments")) == expected_arguments
+    )
+    if not valid:
+        subprocess.run(
+            ["schtasks.exe", "/Delete", "/TN", AUTO_RECOVERY_TASK_NAME, "/F"],
+            capture_output=True,
+            check=False,
+        )
+        raise SafetyStop("The registered task did not preserve the reviewed trigger/action settings; it was removed.")
+    reporter.emit(
+        "INSTALLED",
+        f"Task '{AUTO_RECOVERY_TASK_NAME}' watches Event 208 for {AUTO_RECOVERY_APPLICATION} / "
+        f"{SHARE_VIOLATION_HEX} and runs only while this user is logged on.",
+    )
+    reporter.emit("ACTION", f"{python_executable} -> {script_path}")
+    reporter.emit("PACKAGE", f"Current package verified: {package.package_full_name}")
+
+
+def remove_auto_recovery(reporter: Reporter) -> None:
+    status = automation_task_status()
+    if not status.get("Installed"):
+        reporter.emit("NOT INSTALLED", f"Task '{AUTO_RECOVERY_TASK_NAME}' is already absent.")
+        return
+    completed = subprocess.run(
+        ["schtasks.exe", "/Delete", "/TN", AUTO_RECOVERY_TASK_NAME, "/F"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RecoveryError(f"Could not remove {AUTO_RECOVERY_TASK_NAME}: {detail}")
+    reporter.emit("REMOVED", f"Task '{AUTO_RECOVERY_TASK_NAME}' was removed.")
+
+
+def show_auto_recovery_status(reporter: Reporter) -> int:
+    status = automation_task_status()
+    if not status.get("Installed"):
+        reporter.emit("NOT INSTALLED", f"Task '{AUTO_RECOVERY_TASK_NAME}' is absent.")
+        return 1
+    reporter.emit(
+        "AUTOMATION",
+        f"State={status.get('State')}; run level={status.get('RunLevel')}; "
+        f"logon={status.get('LogonType')}; instances={status.get('MultipleInstances')}.",
+    )
+    reporter.emit("ACTION", f"{status.get('Execute')} {status.get('Arguments')}")
+    reporter.emit(
+        "LAST RUN",
+        f"{status.get('LastRunTime') or 'never'}; result={status.get('LastTaskResult')}",
+    )
+    return 0
+
+
 def appmodel_share_violations(package: PackageInfo, since: datetime) -> list[dict[str, object]]:
     start = _ps_single_quote(since.isoformat())
     package_name = _ps_single_quote(package.package_full_name)
@@ -1005,10 +1253,29 @@ def historical_self_check(reporter: Reporter) -> bool:
 def run(args: argparse.Namespace, reporter: Reporter) -> int:
     package = get_claude_package()
     reporter.emit("PACKAGE", f"Installed: {package.package_full_name}")
+    if args.event_triggered:
+        events = auto_recovery_events(package, minutes=10)
+        if not events:
+            reporter.emit(
+                "NO ACTION",
+                "Scheduled invocation had no matching current-package Event 208 in the last 10 minutes.",
+            )
+            return 0
+        newest = events[0]
+        reporter.emit(
+            "TRIGGER",
+            f"Validated Windows Event record {newest['record_id']} at {newest['time_created']}.",
+        )
     appinfo_pid = get_appinfo_pid()
     if not appinfo_pid:
         reporter.emit("SCAN", "Appinfo is stopped, so it cannot currently retain a stale Claude Job.")
         if args.scan:
+            return 0
+        if args.event_triggered:
+            reporter.emit(
+                "NO ACTION",
+                "The event matched, but Appinfo is stopped; automatic relaunch was suppressed.",
+            )
             return 0
         return 0 if launch_and_verify(package, reporter, args.wait) else 1
 
@@ -1036,6 +1303,12 @@ def run(args: argparse.Namespace, reporter: Reporter) -> int:
         if args.scan:
             reporter.emit("DRY-RUN", "No processes were terminated and Claude was not launched.")
             return 10 if stale else 0
+        if args.event_triggered and not stale:
+            reporter.emit(
+                "NO ACTION",
+                "The event matched, but no exact older Claude Job exists; automatic relaunch was suppressed.",
+            )
+            return 0
         if stale and not args.yes:
             if not sys.stdin.isatty():
                 raise SafetyStop("Confirmation is required; rerun interactively or pass --yes.")
@@ -1064,11 +1337,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repair the verified stale Claude AppX Job failure and start Claude Desktop."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--scan",
         action="store_true",
         help="read-only scan; exit 10 when an exact stale Job is found",
     )
+    mode.add_argument(
+        "--trace",
+        action="store_true",
+        help="read the structured Windows events for this exact launch failure",
+    )
+    mode.add_argument(
+        "--install-automation",
+        action="store_true",
+        help="install the event-triggered automatic recovery task",
+    )
+    mode.add_argument(
+        "--remove-automation",
+        action="store_true",
+        help="remove the event-triggered automatic recovery task",
+    )
+    mode.add_argument(
+        "--automation-status",
+        action="store_true",
+        help="show the automatic recovery task status",
+    )
+    mode.add_argument(
+        "--self-check",
+        action="store_true",
+        help="validate the historical version-selection invariant without elevation",
+    )
+    mode.add_argument("--event-triggered", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--yes", action="store_true", help="skip the typed REPAIR confirmation")
     parser.add_argument(
         "--wait",
@@ -1078,9 +1378,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for a visible Claude window (default: 20)",
     )
     parser.add_argument(
-        "--self-check",
-        action="store_true",
-        help="validate the historical version-selection invariant without elevation",
+        "--minutes",
+        type=int,
+        default=180,
+        metavar="MINUTES",
+        help="lookback window for --trace (default: 180)",
     )
     parser.add_argument("--pause", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--elevated", action="store_true", help=argparse.SUPPRESS)
@@ -1100,6 +1402,12 @@ def main() -> int:
         if args.self_check:
             exit_code = 0 if historical_self_check(reporter) else 1
             return exit_code
+        if args.trace:
+            exit_code = trace_auto_recovery_events(reporter, args.minutes)
+            return exit_code
+        if args.automation_status:
+            exit_code = show_auto_recovery_status(reporter)
+            return exit_code
         if not is_admin() and not args.no_elevate:
             if args.elevated:
                 raise RecoveryError("Elevation completed without an administrator token.")
@@ -1108,6 +1416,14 @@ def main() -> int:
             return 0
         if not is_admin():
             raise RecoveryError("Administrator access is required to inspect Appinfo's Job handles.")
+        if args.install_automation:
+            install_auto_recovery(reporter)
+            exit_code = 0
+            return exit_code
+        if args.remove_automation:
+            remove_auto_recovery(reporter)
+            exit_code = 0
+            return exit_code
         enable_debug_privilege()
         exit_code = run(args, reporter)
         return exit_code
@@ -1122,10 +1438,11 @@ def main() -> int:
     finally:
         try:
             log_path = reporter.save()
-            if reporter.lines:
+            if reporter.lines and sys.stdout is not None:
                 print(f"[LOG] {log_path}", flush=True)
         except OSError as exc:
-            print(f"[LOG ERROR] {exc}", file=sys.stderr, flush=True)
+            if sys.stderr is not None:
+                print(f"[LOG ERROR] {exc}", file=sys.stderr, flush=True)
         if "args" in locals() and args.pause and (is_admin() or args.self_check or args.no_elevate):
             try:
                 input("Press Enter to close...")

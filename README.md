@@ -31,6 +31,29 @@ py -3 .\claude_restart.py --self-check
 
 The most recent run is saved to `last-run.log` in this folder.
 
+## Automatic recovery after a normal Claude click
+
+Windows records this exact failure as structured AppModel events, so an
+optional Scheduled Task can recover after a normal Claude shortcut fails—no
+resident watcher is required.
+
+Double-click **Install Automatic Recovery.cmd** once and accept the UAC prompt.
+The task triggers only for Claude Event 208 with error `0x80070020`, then the
+Python utility independently verifies an exact older Claude Job before it
+terminates or relaunches anything. If that stale Job is absent, it stops to
+avoid a retry loop.
+
+Use **Remove Automatic Recovery.cmd** to remove the task. Read-only commands:
+
+```powershell
+py -3 .\claude_restart.py --trace --minutes 180
+py -3 .\claude_restart.py --automation-status
+```
+
+See [Windows event tracing and automatic recovery](docs/windows-event-automation.md)
+for the event fields, XPath predicate, safeguards, and the expected brief error
+dialog behavior.
+
 ## Scope
 
 This is a targeted repair-and-start tool, not a generic force-restart utility.
