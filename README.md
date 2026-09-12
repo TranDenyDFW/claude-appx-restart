@@ -1,61 +1,60 @@
-# Claude Restart
+# Start Claude when Windows says a file is in use
 
-`claude_restart.py` repairs the recurring Claude Desktop AppX activation failure
-that reports **Another program is currently using this file**, then starts and
-verifies Claude.
+Claude Restart fixes the Claude Desktop error **Another program is currently using this file**. Install automatic recovery once and keep using your normal Claude shortcut, or run the manual launcher whenever Claude fails to open.
 
-The utility does not kill processes by name. It finds the exact
-`Container_Claude_<version>` Windows Job held by `Appinfo`, compares that version
-with the currently installed Claude package, and only terminates a Job that is
-unambiguously older. Its member processes are displayed before the action. A
-current-version Job, a mismatched user/package identity, a newer version, or a
-cross-session member causes a safety stop.
+## Before you start
 
-## Run it
+You need:
 
-Double-click **Start Claude Safely.cmd**. Windows will show one UAC prompt because
-`Appinfo` runs as SYSTEM. The window reports `GREEN` only after a visible Claude
-window appears and no new AppModel `0x80070020` events are found.
+- Windows 10 or Windows 11
+- [Python 3.10 or newer](https://www.python.org/downloads/windows/)
+- The Microsoft Store build of Claude Desktop
 
-Read-only scan from PowerShell:
+## Install automatic recovery
+
+Automatic recovery runs after Windows detects this exact Claude startup error. You don't need to keep another app open.
+
+1. [Download the repository as a ZIP](https://github.com/TranDenyDFW/claude-appx-restart/archive/refs/heads/main.zip).
+2. Extract the ZIP file.
+3. Double-click **Install Automatic Recovery.cmd**.
+4. Approve the Windows User Account Control (UAC) prompt.
+5. Open Claude from your normal shortcut.
+
+Windows creates a Scheduled Task named `Claude AppX Auto-Recovery`. When the error occurs, the task closes only the verified obsolete Claude Job and opens the installed version of Claude.
+
+The error dialog can appear briefly because Windows records the failure before automatic recovery starts.
+
+## Start Claude without automatic recovery
+
+Double-click **Start Claude Safely.cmd** and approve the UAC prompt. The launcher checks for an obsolete Claude Job before opening Claude, so the error dialog should not appear.
+
+The launcher prints `GREEN` after it finds a visible Claude window and confirms that Windows recorded no new `0x80070020` errors.
+
+## Remove automatic recovery
+
+Double-click **Remove Automatic Recovery.cmd** and approve the UAC prompt. This removes the Scheduled Task without changing Claude or Python.
+
+## Check the status or recent errors
+
+Open PowerShell in the extracted folder, then run one of these commands:
 
 ```powershell
+# Check automatic recovery status
+py -3 .\claude_restart.py --automation-status
+
+# Find this Claude startup error in the last 180 minutes
+py -3 .\claude_restart.py --trace --minutes 180
+
+# Scan for an obsolete Claude Job without closing anything
 py -3 .\claude_restart.py --scan
 ```
 
-Historical invariant check (does not elevate or change anything):
+The script writes the latest result to `last-run.log` beside the script.
 
-```powershell
-py -3 .\claude_restart.py --self-check
-```
+## What the tool can close
 
-The most recent run is saved to `last-run.log` in this folder.
+The tool identifies the installed Claude package, then inspects the Windows Job objects held by the Application Information (`Appinfo`) service. It closes a Job only when its package version is older than the installed Claude version.
 
-## Automatic recovery after a normal Claude click
+The tool stops without making changes when it finds a current version, another user, another Windows session, a newer version, or an unexpected package identity. It does not kill processes by executable name.
 
-Windows records this exact failure as structured AppModel events, so an
-optional Scheduled Task can recover after a normal Claude shortcut fails—no
-resident watcher is required.
-
-Double-click **Install Automatic Recovery.cmd** once and accept the UAC prompt.
-The task triggers only for Claude Event 208 with error `0x80070020`, then the
-Python utility independently verifies an exact older Claude Job before it
-terminates or relaunches anything. If that stale Job is absent, it stops to
-avoid a retry loop.
-
-Use **Remove Automatic Recovery.cmd** to remove the task. Read-only commands:
-
-```powershell
-py -3 .\claude_restart.py --trace --minutes 180
-py -3 .\claude_restart.py --automation-status
-```
-
-See [Windows event tracing and automatic recovery](docs/windows-event-automation.md)
-for the event fields, XPath predicate, safeguards, and the expected brief error
-dialog behavior.
-
-## Scope
-
-This is a targeted repair-and-start tool, not a generic force-restart utility.
-If Claude is already healthy and no older Job exists, it leaves all current
-processes alone and simply opens or focuses Claude.
+For the event fields, trigger rule, and validation details, read [Windows event tracing and automatic recovery](docs/windows-event-automation.md).
