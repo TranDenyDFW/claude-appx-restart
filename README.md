@@ -25,6 +25,7 @@ The ZIP contains:
 | `Install Automatic Recovery.cmd` | Registers the scheduled task (one UAC prompt). |
 | `Start Claude Safely.cmd` | Repairs and starts Claude on demand (one UAC prompt). |
 | `Remove Automatic Recovery.cmd` | Removes the scheduled task (one UAC prompt). |
+| `ClaudeRestart-launch.cmd` | Shared dispatcher the three launchers call: runs the exe beside it, or the Python source. |
 
 The executables are not code-signed, so Windows SmartScreen may show **Windows protected your PC** the first time. Choose **More info** and then **Run anyway**, or right-click the file, open **Properties**, and tick **Unblock**. `SHA256SUMS.txt` on the release page lists the checksums of every file.
 
@@ -81,7 +82,7 @@ py -3 .\claude_restart.py --trace --minutes 180
 py -3 .\claude_restart.py --install-automation
 ```
 
-The three `.cmd` launchers use `ClaudeRestart.exe` when it is next to them and fall back to `py -3` or `python.exe` otherwise. When installed from source, the scheduled task runs `pythonw.exe` so it has no console window.
+The three `.cmd` launchers call `ClaudeRestart-launch.cmd`, which runs `ClaudeRestart.exe` when it is next to them and falls back to `py -3` or `python.exe` otherwise. Their exit code is the elevated run's real result, because the tool waits for the administrator process it starts. When installed from source, the scheduled task runs `pythonw.exe` so it has no console window.
 
 ## What the tool can close
 
@@ -99,4 +100,4 @@ For the event fields, trigger rule, and validation details, read [Windows event 
 py -3 build.py
 ```
 
-`build.py` installs the pinned PyInstaller and Pillow from `requirements-build.txt`, runs the unit tests, regenerates the icon with `tools/make_icon.py`, builds both executables from `ClaudeRestart.spec`, smoke-tests them, and writes the release ZIP and `SHA256SUMS.txt` into `dist\`. GitHub Actions runs the same steps on every push and pull request, and publishes a release when a `v*` tag matching `__version__` is pushed.
+`build.py` installs the pinned PyInstaller and Pillow from `requirements-build.txt`, runs the unit tests, regenerates the icon with `tools/make_icon.py`, builds both executables from `ClaudeRestart.spec`, smoke-tests them, and writes the release ZIP and `SHA256SUMS.txt` into `dist\`. GitHub Actions runs the same steps on pull requests and on pushes to `main`. Pushing a `v*` tag that matches `__version__` additionally publishes a release from a separate job that never runs repository code and is the only job with write access.

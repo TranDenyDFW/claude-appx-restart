@@ -15,7 +15,7 @@ jobs:
     name: Test, build and package (windows-latest)
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -42,50 +42,58 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: python build.py --check-tag "${{ github.ref_name }}"
 
-      - name: Build executables and release zip
+      # build.py smoke-tests both executables (--version and --self-check) before zipping.
+      - name: Build, smoke-test and package
         run: python build.py --no-install --skip-tests --skip-icon
 
-      - name: Smoke test the executables
-        run: |
-          .\dist\ClaudeRestart.exe --version
-          .\dist\ClaudeRestart.exe --self-check
-          $quiet = Start-Process -FilePath .\dist\ClaudeRestart-quiet.exe -ArgumentList '--self-check' -PassThru
-          $quiet.WaitForExit()
-          if ($quiet.ExitCode -ne 0) { throw "ClaudeRestart-quiet.exe exited with $($quiet.ExitCode)" }
-          Get-Content .\dist\last-run.log
-          Get-Content .\dist\SHA256SUMS.txt
+      - name: Show checksums
+        run: Get-Content .\dist\SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v7
         with:
           name: ClaudeRestart-win-x64
+          if-no-files-found: error
           path: |
             dist/ClaudeRestart-*.zip
             dist/ClaudeRestart.exe
             dist/ClaudeRestart-quiet.exe
             dist/SHA256SUMS.txt
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    name: Publish GitHub Release (tags only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No checkout: this job never executes repository code. It only publishes the
+      # artifact that the read-only build job produced, so the write token is never
+      # available to build scripts or tests.
+      - uses: actions/download-artifact@v7
+        with:
+          name: ClaudeRestart-win-x64
+          path: dist
+
+      - name: Create or update the release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          # Idempotent: a rerun after a partial failure (for example a GitHub 5xx after the
-          # release was already created) reuses the existing release and replaces its assets.
-          $PSNativeCommandUseErrorActionPreference = $false
-          $zip = (Get-Item dist/ClaudeRestart-*.zip).FullName
-          gh release view $env:TAG --json tagName 2>$null | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Creating release $env:TAG"
-            gh release create $env:TAG --verify-tag --generate-notes --title "ClaudeRestart $env:TAG"
-            if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE" }
-          } else {
-            Write-Host "Release $env:TAG already exists; replacing its assets"
-          }
-          gh release upload $env:TAG --clobber `
-            "$zip#ClaudeRestart $env:TAG (zip: both exes, launchers, docs)" `
-            "dist/ClaudeRestart.exe#ClaudeRestart.exe (console)" `
-            "dist/ClaudeRestart-quiet.exe#ClaudeRestart-quiet.exe (windowed twin used by the scheduled task)" `
+          set -euo pipefail
+          zip=$(ls dist/ClaudeRestart-v*-win-x64.zip)
+          # A rerun after a partial failure (for example a GitHub 5xx after the release
+          # was already created) reuses the existing release and replaces its assets.
+          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            echo "Release $TAG already exists; replacing its assets"
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" --verify-tag --generate-notes --title "ClaudeRestart $TAG"
+          fi
+          gh release upload "$TAG" --clobber \
+            "$zip#ClaudeRestart $TAG (zip: both exes, launchers, docs)" \
+            "dist/ClaudeRestart.exe#ClaudeRestart.exe (console)" \
+            "dist/ClaudeRestart-quiet.exe#ClaudeRestart-quiet.exe (windowed twin used by the scheduled task)" \
             "dist/SHA256SUMS.txt#SHA256SUMS.txt"
-          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed with exit code $LASTEXITCODE" }
-          gh release view $env:TAG --json assets --jq '.assets[].name'
+          gh release view "$TAG" --json assets --jq '.assets[].name'

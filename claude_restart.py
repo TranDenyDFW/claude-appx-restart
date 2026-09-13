@@ -34,7 +34,7 @@ from typing import Iterable
 import xml.etree.ElementTree as ET
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 APP_NAME = "Claude"
 EXPECTED_PACKAGE_FAMILY = "Claude_pzs8sxrjxfjjc"
@@ -67,6 +67,10 @@ SC_MANAGER_CONNECT = 0x0001
 SERVICE_QUERY_STATUS = 0x0004
 SC_STATUS_PROCESS_INFO = 0
 SW_SHOWNORMAL = 1
+SEE_MASK_NOCLOSEPROCESS = 0x00000040
+SEE_MASK_NOASYNC = 0x00000100
+ERROR_CANCELLED = 1223
+INFINITE = 0xFFFFFFFF
 CREATE_NO_WINDOW = 0x08000000
 # Every child process (PowerShell, schtasks, explorer) is spawned without a console so an
 # event-triggered run under pythonw.exe / ClaudeRestart-quiet.exe never flashes a window.
@@ -175,6 +179,27 @@ class FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
 
 
+class SHELLEXECUTEINFOW(ctypes.Structure):
+    # 112 bytes on x64; hIconOrMonitor stands in for the hIcon/hMonitor union.
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("fMask", wintypes.ULONG),
+        ("hwnd", wintypes.HWND),
+        ("lpVerb", wintypes.LPCWSTR),
+        ("lpFile", wintypes.LPCWSTR),
+        ("lpParameters", wintypes.LPCWSTR),
+        ("lpDirectory", wintypes.LPCWSTR),
+        ("nShow", ctypes.c_int),
+        ("hInstApp", wintypes.HINSTANCE),
+        ("lpIDList", wintypes.LPVOID),
+        ("lpClass", wintypes.LPCWSTR),
+        ("hkeyClass", wintypes.HKEY),
+        ("dwHotKey", wintypes.DWORD),
+        ("hIconOrMonitor", wintypes.HANDLE),
+        ("hProcess", wintypes.HANDLE),
+    ]
+
+
 @dataclass(frozen=True)
 class PackageInfo:
     name: str
@@ -211,6 +236,9 @@ class ProcessInfo:
 class Reporter:
     def __init__(self) -> None:
         self.lines: list[str] = []
+        # False while this process only hands off to an elevated child, so the child's
+        # last-run.log is not overwritten by the parent's hand-off lines.
+        self.persist = True
 
     def emit(self, state: str, message: str) -> None:
         line = f"[{state}] {message}"
@@ -338,6 +366,12 @@ def _configure_windows_apis() -> None:
         ctypes.c_int,
     ]
     shell32.ShellExecuteW.restype = ctypes.c_void_p
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
 
     user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
@@ -434,16 +468,42 @@ def elevation_request(argv: list[str]) -> tuple[str, str, str]:
     return str(executable), subprocess.list2cmdline(parts), str(app_location())
 
 
-def relaunch_elevated() -> None:
+def relaunch_elevated() -> int:
+    """Re-run this tool elevated (one UAC prompt), wait for it, and return its exit code.
+
+    Waiting lets the .cmd launchers and scripted callers see the elevated run's real
+    result instead of the hand-off parent's.
+    """
     target, parameters, workdir = elevation_request(sys.argv[1:])
     if IS_FROZEN:
-        # The elevated child outlives this process; PyInstaller (>= 6.9) must give it its
-        # own extraction directory instead of the one deleted when this parent exits.
+        # PyInstaller (>= 6.9) must give the child its own extraction directory rather
+        # than sharing the one that is deleted when this parent exits.
         os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    result = shell32.ShellExecuteW(None, "runas", target, parameters, workdir, SW_SHOWNORMAL)
-    value = int(result or 0)
-    if value <= 32:
-        raise RecoveryError(f"Administrator elevation was not started (ShellExecute code {value}).")
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.lpVerb = "runas"
+    info.lpFile = target
+    info.lpParameters = parameters
+    info.lpDirectory = workdir
+    info.nShow = SW_SHOWNORMAL
+    ctypes.set_last_error(0)
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        code = ctypes.get_last_error()
+        if code == ERROR_CANCELLED:
+            raise RecoveryError("The User Account Control prompt was cancelled; nothing was changed.")
+        raise RecoveryError(f"Administrator elevation was not started: {ctypes.WinError(code)}")
+    handle = int(info.hProcess or 0)
+    if not handle:
+        raise RecoveryError("Administrator elevation started, but Windows returned no process handle.")
+    try:
+        kernel32.WaitForSingleObject(wintypes.HANDLE(handle), INFINITE)
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(wintypes.HANDLE(handle), ctypes.byref(exit_code)):
+            raise _winerror("GetExitCodeProcess")
+        return int(exit_code.value)
+    finally:
+        _close_handle(handle)
 
 
 def enable_debug_privilege() -> None:
@@ -863,21 +923,26 @@ def process_details(pids: Iterable[int]) -> list[ProcessInfo]:
 
 
 def _partition_members(
-    details: Iterable[ProcessInfo], current_session: int | None
+    details: Iterable[ProcessInfo], current_session: int | None, still_in_job: Iterable[int]
 ) -> tuple[list[int], list[int]]:
-    """Split Job members into (exited, foreign-session) PIDs.
+    """Split Job members into (exited, unverified) PIDs.
 
-    A member that exited between the Job snapshot and this check has no session and no
-    process handle; that is benign, not a sign of another user's session.
+    A member counts as exited only when its session and process could not be opened
+    AND the kernel no longer lists it in the Job (a fresh JobObjectBasicProcessIdList
+    snapshot). A member the kernel still lists but that cannot be verified in this
+    session is unverified, which stops the repair: the Job is never terminated on an
+    inference.
     """
+    remaining = set(still_in_job)
     exited: list[int] = []
-    foreign: list[int] = []
+    unverified: list[int] = []
     for info in details:
-        if info.session_id is None and info.name == "<exited or inaccessible>":
+        opaque = info.session_id is None and info.name == "<exited or inaccessible>"
+        if opaque and info.pid not in remaining:
             exited.append(info.pid)
         elif current_session is None or info.session_id is None or info.session_id != current_session:
-            foreign.append(info.pid)
-    return exited, foreign
+            unverified.append(info.pid)
+    return exited, unverified
 
 
 def validate_live_members(
@@ -892,11 +957,11 @@ def validate_live_members(
         )
     current_session = _process_session_id(os.getpid())
     details = process_details(live_pids)
-    exited, foreign = _partition_members(details, current_session)
-    if foreign:
+    exited, unverified = _partition_members(details, current_session, query_job_pids(job.handle))
+    if unverified:
         raise SafetyStop(
-            f"Refusing to terminate {job.name}: PID(s) are not verified in this user session: "
-            f"{foreign}."
+            f"Refusing to terminate {job.name}: PID(s) could not be verified in this user session: "
+            f"{unverified}."
         )
     if exited and reporter is not None:
         reporter.emit("NOTE", f"{len(exited)} member(s) of {job.name} exited before validation: {exited}.")
@@ -1193,8 +1258,22 @@ def _delete_task() -> subprocess.CompletedProcess[str]:
     )
 
 
+def trigger_identity_problem(package: PackageInfo) -> str | None:
+    """Explain why the event trigger could never fire for this package, or return None."""
+    installed = f"{package.package_family_name}!{package.application_id}"
+    if installed == AUTO_RECOVERY_APPLICATION:
+        return None
+    return (
+        f"Installed application id {installed} differs from the trigger identity "
+        f"{AUTO_RECOVERY_APPLICATION}; automatic recovery would never fire until the tool is updated."
+    )
+
+
 def install_auto_recovery(reporter: Reporter) -> None:
     package = get_claude_package()
+    problem = trigger_identity_problem(package)
+    if problem:
+        raise SafetyStop(problem + " Automation was not installed.")
     executable, arguments = task_launcher()
     if IS_FROZEN and QUIET_EXE_SUFFIX not in executable.name:
         reporter.emit(
@@ -1254,11 +1333,12 @@ def show_auto_recovery_status(reporter: Reporter) -> int:
         f"logon={status.get('LogonType')}; instances={status.get('MultipleInstances')}.",
     )
     reporter.emit("ACTION", f"{status.get('Execute')} {status.get('Arguments')}")
-    on_battery = "yes" if status.get("DisallowStartIfOnBatteries") is False else "no"
+    starts_on_battery = "yes" if status.get("DisallowStartIfOnBatteries") is False else "no"
+    survives_unplug = "yes" if status.get("StopIfGoingOnBatteries") is False else "no"
     reporter.emit(
         "SETTINGS",
-        f"starts on battery={on_battery}; time limit={status.get('ExecutionTimeLimit') or 'default'}; "
-        f"priority={status.get('Priority')}.",
+        f"starts on battery={starts_on_battery}; keeps running when unplugged={survives_unplug}; "
+        f"time limit={status.get('ExecutionTimeLimit') or 'default'}; priority={status.get('Priority')}.",
     )
     if status.get("Description"):
         reporter.emit("DESCRIPTION", str(status.get("Description")))
@@ -1450,13 +1530,9 @@ def historical_self_check(reporter: Reporter) -> bool:
 def run(args: argparse.Namespace, reporter: Reporter) -> int:
     package = get_claude_package()
     reporter.emit("PACKAGE", f"Installed: {package.package_full_name}")
-    installed_aumid = f"{package.package_family_name}!{package.application_id}"
-    if installed_aumid != AUTO_RECOVERY_APPLICATION:
-        reporter.emit(
-            "WARN",
-            f"Installed application id {installed_aumid} differs from the trigger identity "
-            f"{AUTO_RECOVERY_APPLICATION}; automatic recovery will not fire until the tool is updated.",
-        )
+    problem = trigger_identity_problem(package)
+    if problem:
+        reporter.emit("WARN", problem)
     if args.event_triggered:
         events = auto_recovery_events(package, minutes=10)
         if not events:
@@ -1646,8 +1722,9 @@ def main() -> int:
             if args.elevated:
                 raise RecoveryError("Elevation completed without an administrator token.")
             reporter.emit("UAC", "Requesting administrator access to inspect Appinfo's Job handles.")
-            relaunch_elevated()
-            exit_code = EXIT_OK
+            reporter.persist = False  # the elevated child owns last-run.log for this run
+            exit_code = relaunch_elevated()
+            reporter.emit("ELEVATED", f"The administrator run finished with exit code {exit_code}; see last-run.log.")
         elif not is_admin():
             raise RecoveryError("Administrator access is required to inspect Appinfo's Job handles.")
         elif args.install_automation:
@@ -1670,7 +1747,7 @@ def main() -> int:
         exit_code = EXIT_INTERNAL_ERROR
     finally:
         try:
-            log_path = reporter.save()
+            log_path = reporter.save() if reporter.persist else None
             if log_path is not None and sys.stdout is not None:
                 print(f"[LOG] {log_path}", flush=True)
         except OSError as exc:

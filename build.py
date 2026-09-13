@@ -2,8 +2,10 @@
 """Build ClaudeRestart.exe and ClaudeRestart-quiet.exe with PyInstaller.
 
 Steps: install the pinned build tools (unless --no-install), run the unit tests,
-regenerate the icon, run PyInstaller on ClaudeRestart.spec, smoke-test the console
-exe, then zip the release layout into dist/. Windows, Python 3.10+.
+regenerate the icon, run PyInstaller on ClaudeRestart.spec, smoke-test both
+executables, then zip the release layout into dist/. Windows, Python 3.10+.
+read_version() is the single place the version is read from claude_restart.py;
+ClaudeRestart.spec imports it from here.
 
     py -3 build.py
     py -3 build.py --no-install --skip-tests
@@ -28,6 +30,7 @@ DIST = ROOT / "dist"
 SOURCE = ROOT / "claude_restart.py"
 EXECUTABLES = ("ClaudeRestart.exe", "ClaudeRestart-quiet.exe")
 RELEASE_FILES = (
+    "ClaudeRestart-launch.cmd",
     "Install Automatic Recovery.cmd",
     "Remove Automatic Recovery.cmd",
     "Start Claude Safely.cmd",
@@ -36,7 +39,7 @@ RELEASE_FILES = (
 )
 
 
-def version() -> str:
+def read_version() -> str:
     match = re.search(r'^__version__\s*=\s*"([^"]+)"', SOURCE.read_text(encoding="utf-8"), re.M)
     if not match:
         sys.exit("__version__ not found in claude_restart.py")
@@ -64,7 +67,7 @@ def main() -> int:
     parser.add_argument("--check-tag", metavar="TAG", help="exit 1 unless TAG equals 'v' + __version__, then stop")
     args = parser.parse_args()
 
-    current = version()
+    current = read_version()
     if args.check_tag is not None:
         expected = f"v{current}"
         if args.check_tag != expected:
