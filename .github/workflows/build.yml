@@ -49,7 +49,9 @@ jobs:
         run: |
           .\dist\ClaudeRestart.exe --version
           .\dist\ClaudeRestart.exe --self-check
-          Start-Process -FilePath .\dist\ClaudeRestart-quiet.exe -ArgumentList '--self-check' -Wait -PassThru | ForEach-Object { if ($_.ExitCode -ne 0) { throw "quiet exe exited $($_.ExitCode)" } }
+          $quiet = Start-Process -FilePath .\dist\ClaudeRestart-quiet.exe -ArgumentList '--self-check' -PassThru
+          $quiet.WaitForExit()
+          if ($quiet.ExitCode -ne 0) { throw "ClaudeRestart-quiet.exe exited with $($quiet.ExitCode)" }
           Get-Content .\dist\last-run.log
           Get-Content .\dist\SHA256SUMS.txt
 

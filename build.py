@@ -100,6 +100,15 @@ def main() -> int:
     log = DIST / "last-run.log"
     if log.is_file():
         log.unlink()
+    quiet_exe = DIST / EXECUTABLES[1]
+    print("+", subprocess.list2cmdline([str(quiet_exe), "--self-check"]), "(windowed, no output expected)", flush=True)
+    quiet = subprocess.run([str(quiet_exe), "--self-check"], cwd=ROOT, check=False)
+    if quiet.returncode != 0:
+        sys.exit(f"Smoke test failed: {quiet_exe.name} --self-check exited {quiet.returncode}.")
+    if not log.is_file() or "SELF-CHECK" not in log.read_text(encoding="utf-8"):
+        sys.exit(f"Smoke test failed: {quiet_exe.name} did not write {log.name} beside itself.")
+    print(log.read_text(encoding="utf-8").strip().splitlines()[-1], flush=True)
+    log.unlink()
 
     archive = DIST / f"ClaudeRestart-v{current}-win-x64.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
