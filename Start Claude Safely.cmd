@@ -2,18 +2,27 @@
 setlocal
 cd /d "%~dp0"
 
+if exist "%~dp0ClaudeRestart.exe" (
+    "%~dp0ClaudeRestart.exe" --yes --pause
+    exit /b
+)
+
+if not exist "%~dp0claude_restart.py" goto :missing
+
 where py.exe >nul 2>&1
 if not errorlevel 1 (
     py.exe -3 "%~dp0claude_restart.py" --yes --pause
-    exit /b %errorlevel%
+    exit /b
 )
 
 where python.exe >nul 2>&1
 if not errorlevel 1 (
     python.exe "%~dp0claude_restart.py" --yes --pause
-    exit /b %errorlevel%
+    exit /b
 )
 
-echo Python 3 was not found. Install Python 3 or add it to PATH.
+:missing
+echo Neither ClaudeRestart.exe nor Python 3 with claude_restart.py was found next to this launcher.
+echo Download the latest release ZIP from https://github.com/TranDenyDFW/claude-appx-restart/releases
 pause
 exit /b 1
