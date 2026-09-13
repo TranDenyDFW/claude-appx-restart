@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import ctypes
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -256,6 +257,115 @@ class TriggerIdentityTests(unittest.TestCase):
         problem = app.trigger_identity_problem(self.package("ClaudeApp"))
         self.assertIn("Claude_pzs8sxrjxfjjc!ClaudeApp", problem)
         self.assertIn(app.AUTO_RECOVERY_APPLICATION, problem)
+
+
+class InstallDirTests(unittest.TestCase):
+    RELEASE = {
+        "ClaudeRestart.exe": b"console",
+        "ClaudeRestart-quiet.exe": b"quiet",
+        "ClaudeRestart-launch.cmd": b"launch",
+        "Install Automatic Recovery.cmd": b"install",
+        "README.md": b"readme",
+        "docs/windows-event-automation.md": b"docs",
+        "unrelated.txt": b"not part of the release",
+    }
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name).resolve()
+        self.source = root / "Downloads" / "ClaudeRestart-v1.0.2-win-x64"
+        self.target = root / "Program Files" / "ClaudeRestart"
+        for relative, content in self.RELEASE.items():
+            path = self.source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    def frozen_at(self, folder: Path) -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(app, "IS_FROZEN", True))
+        stack.enter_context(mock.patch.object(sys, "executable", str(folder / "ClaudeRestart.exe")))
+        return stack
+
+    @unittest.skipUnless(sys.platform == "win32", "known folders are Windows-only")
+    def test_program_files_comes_from_the_shell_not_the_environment(self) -> None:
+        app._configure_windows_apis()
+        real = app.program_files_dir()
+        self.assertTrue(real.is_absolute() and real.is_dir())
+        with mock.patch.dict(os.environ, {"ProgramFiles": self.tmp.name, "ProgramW6432": self.tmp.name}):
+            self.assertEqual(app.program_files_dir(), real)
+        self.assertEqual(app.install_dir(), real / "ClaudeRestart")
+
+    def test_copy_installs_the_release_layout(self) -> None:
+        reporter = app.Reporter()
+        with self.frozen_at(self.source):
+            location = app.copy_to_install_dir(reporter, self.target)
+        self.assertEqual(location, self.target)
+        for relative, content in self.RELEASE.items():
+            installed = self.target / relative
+            if relative == "unrelated.txt":
+                self.assertFalse(installed.exists(), "files outside the release layout are not copied")
+            else:
+                self.assertEqual(installed.read_bytes(), content, relative)
+        self.assertTrue(any(line.startswith("[COPIED] Installed 6 file(s)") for line in reporter.lines), reporter.lines)
+        self.assertTrue(any("you can delete that folder" in line for line in reporter.lines))
+
+    def test_copy_uses_canonical_names_for_a_renamed_download(self) -> None:
+        (self.source / "ClaudeRestart.exe").rename(self.source / "claude-restart-1.0.2.exe")
+        (self.source / "ClaudeRestart-quiet.exe").rename(self.source / "claude-restart-1.0.2-quiet.exe")
+        with mock.patch.object(app, "IS_FROZEN", True), mock.patch.object(
+            sys, "executable", str(self.source / "claude-restart-1.0.2.exe")
+        ):
+            app.copy_to_install_dir(app.Reporter(), self.target)
+        self.assertEqual((self.target / "ClaudeRestart.exe").read_bytes(), b"console")
+        self.assertEqual((self.target / "ClaudeRestart-quiet.exe").read_bytes(), b"quiet")
+
+    def test_missing_quiet_twin_changes_nothing(self) -> None:
+        (self.source / "ClaudeRestart-quiet.exe").unlink()
+        with self.frozen_at(self.source):
+            with self.assertRaises(app.RecoveryError) as stop:
+                app.copy_to_install_dir(app.Reporter(), self.target)
+        self.assertIn("ClaudeRestart-quiet.exe was not found", str(stop.exception))
+        self.assertFalse(self.target.exists(), "nothing is copied when a required file is missing")
+
+    def test_copy_failure_is_reported_clearly(self) -> None:
+        with self.frozen_at(self.source), mock.patch.object(app.shutil, "copyfile", side_effect=PermissionError("in use")):
+            with self.assertRaises(app.RecoveryError) as stop:
+                app.copy_to_install_dir(app.Reporter(), self.target)
+        self.assertIn("wait a minute and install again", str(stop.exception))
+
+    def test_running_from_the_install_folder_copies_nothing(self) -> None:
+        reporter = app.Reporter()
+        with self.frozen_at(self.source):
+            self.assertEqual(app.copy_to_install_dir(reporter, self.source), self.source)
+        self.assertTrue(reporter.lines[0].startswith("[LOCATION] Already running from"))
+
+    def test_remove_deletes_only_installed_files(self) -> None:
+        with self.frozen_at(self.source):
+            app.copy_to_install_dir(app.Reporter(), self.target)
+        (self.target / "last-run.log").write_text("log", encoding="utf-8")
+        (self.target / "keep-me.txt").write_text("user file", encoding="utf-8")
+        reporter = app.Reporter()
+        with self.frozen_at(self.source):
+            app.remove_install_dir(reporter, self.target)
+        self.assertEqual(sorted(p.name for p in self.target.rglob("*")), ["keep-me.txt"])
+        self.assertTrue(any(line.startswith("[NOTE] Removed the installed files") for line in reporter.lines))
+
+    def test_remove_deletes_the_folder_when_only_installed_files_remain(self) -> None:
+        with self.frozen_at(self.source):
+            app.copy_to_install_dir(app.Reporter(), self.target)
+        reporter = app.Reporter()
+        with self.frozen_at(self.source):
+            app.remove_install_dir(reporter, self.target)
+        self.assertFalse(self.target.exists())
+        self.assertTrue(any(line.startswith("[REMOVED] Deleted") for line in reporter.lines))
+
+    def test_remove_leaves_the_folder_it_is_running_from(self) -> None:
+        reporter = app.Reporter()
+        with self.frozen_at(self.source):
+            app.remove_install_dir(reporter, self.source)
+        self.assertTrue((self.source / "ClaudeRestart.exe").exists())
+        self.assertTrue(reporter.lines[0].startswith("[NOTE]"))
 
 
 class ElevationTests(unittest.TestCase):
