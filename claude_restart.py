@@ -8,7 +8,9 @@ Job handle held by Appinfo, displays the Job's current members, terminates that
 Job only when its identity and older version are unambiguous, then launches and
 verifies the currently installed Claude package.
 
-Python 3.10+; Windows only; no third-party packages.
+Python 3.10+; Windows only; no third-party packages. The same file is frozen by
+PyInstaller into ClaudeRestart.exe (console) and ClaudeRestart-quiet.exe
+(windowed twin used by the scheduled task); see build.py.
 """
 
 from __future__ import annotations
@@ -22,12 +24,17 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
+import traceback
 from typing import Iterable
 import xml.etree.ElementTree as ET
 
+
+__version__ = "1.0.0"
 
 APP_NAME = "Claude"
 EXPECTED_PACKAGE_FAMILY = "Claude_pzs8sxrjxfjjc"
@@ -60,6 +67,40 @@ SC_MANAGER_CONNECT = 0x0001
 SERVICE_QUERY_STATUS = 0x0004
 SC_STATUS_PROCESS_INFO = 0
 SW_SHOWNORMAL = 1
+CREATE_NO_WINDOW = 0x08000000
+# Every child process (PowerShell, schtasks, explorer) is spawned without a console so an
+# event-triggered run under pythonw.exe / ClaudeRestart-quiet.exe never flashes a window.
+_NO_WINDOW: dict[str, int] = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+QUIET_EXE_SUFFIX = "-quiet"
+TASK_ARGUMENTS = "--event-triggered --yes --wait 30"
+TASK_XML_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+# Registered from XML rather than schtasks switches: the switch defaults leave
+# DisallowStartIfOnBatteries/StopIfGoingOnBatteries enabled, which silently disables
+# automatic recovery on a laptop running on battery, and impose a 72-hour time limit.
+TASK_SETTINGS = (
+    ("MultipleInstancesPolicy", "IgnoreNew"),
+    ("DisallowStartIfOnBatteries", "false"),
+    ("StopIfGoingOnBatteries", "false"),
+    ("AllowHardTerminate", "true"),
+    ("StartWhenAvailable", "false"),
+    ("RunOnlyIfNetworkAvailable", "false"),
+    ("AllowStartOnDemand", "true"),
+    ("Enabled", "true"),
+    ("Hidden", "false"),
+    ("RunOnlyIfIdle", "false"),
+    ("WakeToRun", "false"),
+    ("ExecutionTimeLimit", "PT5M"),
+    ("Priority", "5"),
+)
+LOG_FILE_NAME = "last-run.log"
+LOG_FALLBACK_DIRNAME = "ClaudeRestart"
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_SAFETY_STOP = 2
+EXIT_INTERNAL_ERROR = 3
+EXIT_STALE_FOUND = 10
 
 
 if os.name == "nt":
@@ -92,10 +133,12 @@ class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
 
 
 class UNICODE_STRING(ctypes.Structure):
+    # Buffer is a raw address: a UNICODE_STRING is length-counted and need not be
+    # NUL-terminated, so it is read with wstring_at(address, Length // 2).
     _fields_ = [
         ("Length", wintypes.USHORT),
         ("MaximumLength", wintypes.USHORT),
-        ("Buffer", wintypes.LPWSTR),
+        ("Buffer", ctypes.c_void_p),
     ]
 
 
@@ -175,11 +218,22 @@ class Reporter:
         if sys.stdout is not None:
             print(line, flush=True)
 
-    def save(self) -> Path:
-        target = Path(__file__).resolve().with_name("last-run.log")
+    def save(self, base: Path | None = None, fallback: Path | None = None) -> Path | None:
+        """Write the run log beside the tool; fall back to %LOCALAPPDATA%\\ClaudeRestart."""
+        if not self.lines:
+            return None
         stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-        target.write_text(stamp + "\n" + "\n".join(self.lines) + "\n", encoding="utf-8")
-        return target
+        text = stamp + "\n" + "\n".join(self.lines) + "\n"
+        target = (base or app_location()) / LOG_FILE_NAME
+        try:
+            target.write_text(text, encoding="utf-8")
+            return target
+        except OSError:
+            root = fallback or log_fallback_dir()
+            root.mkdir(parents=True, exist_ok=True)
+            target = root / LOG_FILE_NAME
+            target.write_text(text, encoding="utf-8")
+            return target
 
 
 def _configure_windows_apis() -> None:
@@ -316,18 +370,77 @@ def is_admin() -> bool:
     return bool(shell32.IsUserAnAdmin())
 
 
+def app_entry() -> Path:
+    """Return the file a launcher must run: the exe when frozen, else this script."""
+    return Path(sys.executable if IS_FROZEN else __file__).resolve()
+
+
+def app_location() -> Path:
+    return app_entry().parent
+
+
+def log_fallback_dir() -> Path:
+    root = os.environ.get("LOCALAPPDATA")
+    return (Path(root) if root else app_location()) / LOG_FALLBACK_DIRNAME
+
+
+def _interpreter_for_task() -> Path:
+    """Return pythonw.exe (or python.exe) for the scheduled task when running from source."""
+    base = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve()
+    pythonw = base.with_name("pythonw.exe")
+    chosen = pythonw if pythonw.is_file() else base
+    reparse_tag = getattr(os.lstat(chosen), "st_reparse_tag", 0)
+    if reparse_tag and reparse_tag == getattr(stat, "IO_REPARSE_TAG_APPEXECLINK", 0x8000001B):
+        raise RecoveryError(
+            "The Python interpreter is a Microsoft Store app-execution alias, which Task Scheduler "
+            "cannot run reliably. Install Python from python.org or use ClaudeRestart.exe."
+        )
+    return chosen
+
+
+def launcher_command(*, quiet: bool = False) -> tuple[Path, str]:
+    """Return (executable, argument prefix) that re-runs this tool.
+
+    The prefix is empty for a frozen exe and the quoted script path when running from
+    source. With quiet=True the windowed twin (ClaudeRestart-quiet.exe or pythonw.exe)
+    is preferred so an event-triggered run shows no console window.
+    """
+    if IS_FROZEN:
+        executable = app_entry()
+        if quiet:
+            twin = executable.with_name(f"{executable.stem}{QUIET_EXE_SUFFIX}{executable.suffix}")
+            if twin.is_file():
+                executable = twin
+        return executable, ""
+    interpreter = _interpreter_for_task() if quiet else Path(sys.executable).resolve()
+    return interpreter, f'"{app_entry()}"'
+
+
+def build_task_action(executable: Path, arguments: str) -> str:
+    return f'"{executable}" {arguments}'.strip()
+
+
+def task_launcher() -> tuple[Path, str]:
+    """Return (executable, arguments) registered as the scheduled task action."""
+    executable, prefix = launcher_command(quiet=True)
+    return executable, f"{prefix} {TASK_ARGUMENTS}".strip()
+
+
+def elevation_request(argv: list[str]) -> tuple[str, str, str]:
+    """Return (target, parameters, working directory) for the ShellExecute runas relaunch."""
+    forwarded = [arg for arg in argv if arg != "--elevated"]
+    executable, prefix = launcher_command()
+    parts = ([prefix.strip('"')] if prefix else []) + forwarded + ["--elevated"]
+    return str(executable), subprocess.list2cmdline(parts), str(app_location())
+
+
 def relaunch_elevated() -> None:
-    script = str(Path(__file__).resolve())
-    forwarded = [arg for arg in sys.argv[1:] if arg != "--elevated"]
-    parameters = subprocess.list2cmdline([script, *forwarded, "--elevated"])
-    result = shell32.ShellExecuteW(
-        None,
-        "runas",
-        sys.executable,
-        parameters,
-        str(Path(script).parent),
-        SW_SHOWNORMAL,
-    )
+    target, parameters, workdir = elevation_request(sys.argv[1:])
+    if IS_FROZEN:
+        # The elevated child outlives this process; PyInstaller (>= 6.9) must give it its
+        # own extraction directory instead of the one deleted when this parent exits.
+        os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    result = shell32.ShellExecuteW(None, "runas", target, parameters, workdir, SW_SHOWNORMAL)
     value = int(result or 0)
     if value <= 32:
         raise RecoveryError(f"Administrator elevation was not started (ShellExecute code {value}).")
@@ -371,6 +484,7 @@ def _run_powershell(script: str, timeout: int = 30) -> str:
         errors="replace",
         timeout=timeout,
         check=False,
+        **_NO_WINDOW,
     )
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
@@ -525,7 +639,8 @@ def _query_object_name(handle: int) -> str | None:
             value = UNICODE_STRING.from_buffer_copy(buffer)
             if not value.Buffer or not value.Length:
                 return None
-            return ctypes.wstring_at(value.Buffer, value.Length // ctypes.sizeof(ctypes.c_wchar))
+            # The address points into `buffer`, which stays alive for this read.
+            return ctypes.wstring_at(int(value.Buffer), value.Length // ctypes.sizeof(ctypes.c_wchar))
         unsigned = status & 0xFFFFFFFF
         if unsigned in (0xC0000004, 0xC0000023, 0x80000005):
             size = max(size * 2, int(needed.value) + 2)
@@ -747,7 +862,27 @@ def process_details(pids: Iterable[int]) -> list[ProcessInfo]:
     ]
 
 
-def validate_live_members(job: JobRecord, appinfo_pid: int) -> list[ProcessInfo]:
+def _partition_members(
+    details: Iterable[ProcessInfo], current_session: int | None
+) -> tuple[list[int], list[int]]:
+    """Split Job members into (exited, foreign-session) PIDs.
+
+    A member that exited between the Job snapshot and this check has no session and no
+    process handle; that is benign, not a sign of another user's session.
+    """
+    exited: list[int] = []
+    foreign: list[int] = []
+    for info in details:
+        if info.session_id is None and info.name == "<exited or inaccessible>":
+            exited.append(info.pid)
+        elif current_session is None or info.session_id is None or info.session_id != current_session:
+            foreign.append(info.pid)
+    return exited, foreign
+
+
+def validate_live_members(
+    job: JobRecord, appinfo_pid: int, reporter: Reporter | None = None
+) -> list[ProcessInfo]:
     live_pids = query_job_pids(job.handle)
     prohibited = {0, 4, os.getpid(), appinfo_pid}
     collision = prohibited.intersection(live_pids)
@@ -757,17 +892,15 @@ def validate_live_members(job: JobRecord, appinfo_pid: int) -> list[ProcessInfo]
         )
     current_session = _process_session_id(os.getpid())
     details = process_details(live_pids)
-    bad_sessions = [
-        info.pid
-        for info in details
-        if info.session_id is None or current_session is None or info.session_id != current_session
-    ]
-    if bad_sessions:
+    exited, foreign = _partition_members(details, current_session)
+    if foreign:
         raise SafetyStop(
             f"Refusing to terminate {job.name}: PID(s) are not verified in this user session: "
-            f"{bad_sessions}."
+            f"{foreign}."
         )
-    job.pids = live_pids
+    if exited and reporter is not None:
+        reporter.emit("NOTE", f"{len(exited)} member(s) of {job.name} exited before validation: {exited}.")
+    job.pids = [pid for pid in live_pids if pid not in exited]
     return details
 
 
@@ -875,13 +1008,6 @@ def is_auto_recovery_event(xml_text: str) -> bool:
     )
 
 
-def build_task_action(python_executable: Path, script_path: Path) -> str:
-    return (
-        f'"{python_executable}" "{script_path}" '
-        "--event-triggered --yes --wait 30"
-    )
-
-
 def auto_recovery_events(
     package: PackageInfo | None = None,
     *,
@@ -953,12 +1079,6 @@ def trace_auto_recovery_events(reporter: Reporter, minutes: int) -> int:
     return 10
 
 
-def _task_python_executable() -> Path:
-    executable = Path(sys.executable).resolve()
-    pythonw = executable.with_name("pythonw.exe")
-    return pythonw if pythonw.is_file() else executable
-
-
 def automation_task_status() -> dict[str, object]:
     task_name = _ps_single_quote(AUTO_RECOVERY_TASK_NAME)
     script = f"""
@@ -979,6 +1099,11 @@ $action = @($task.Actions)[0]
     Subscription = [string]$trigger.Subscription
     Execute = [string]$action.Execute
     Arguments = [string]$action.Arguments
+    DisallowStartIfOnBatteries = [bool]$task.Settings.DisallowStartIfOnBatteries
+    StopIfGoingOnBatteries = [bool]$task.Settings.StopIfGoingOnBatteries
+    ExecutionTimeLimit = [string]$task.Settings.ExecutionTimeLimit
+    Priority = [int]$task.Settings.Priority
+    Description = [string]$task.Description
     LastRunTime = if ($info) {{ $info.LastRunTime.ToString('o') }} else {{ '' }}
     LastTaskResult = if ($info) {{ $info.LastTaskResult }} else {{ $null }}
 }} | ConvertTo-Json -Compress -Depth 4
@@ -987,61 +1112,122 @@ $action = @($task.Actions)[0]
     return dict(json.loads(raw))
 
 
-def install_auto_recovery(reporter: Reporter) -> None:
-    package = get_claude_package()
-    script_path = Path(__file__).resolve()
-    python_executable = _task_python_executable()
-    action = build_task_action(python_executable, script_path)
-    command = [
-        "schtasks.exe",
-        "/Create",
-        "/TN",
-        AUTO_RECOVERY_TASK_NAME,
-        "/TR",
-        action,
-        "/SC",
-        "ONEVENT",
-        "/EC",
-        APPMODEL_LOG,
-        "/MO",
-        AUTO_RECOVERY_XPATH,
-        "/RL",
-        "HIGHEST",
-        "/IT",
-        "/F",
-    ]
-    completed = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False)
+def build_task_xml(executable: Path, arguments: str, user_sid: str, working_directory: Path) -> str:
+    """Return the Task Scheduler XML for the event-triggered recovery task.
+
+    The shape mirrors what Windows itself exports for ONEVENT tasks; the settings
+    come from TASK_SETTINGS so the task also runs on battery power and is limited
+    to five minutes per instance.
+    """
+    subscription = (
+        f'<QueryList><Query Id="0" Path="{APPMODEL_LOG}">'
+        f'<Select Path="{APPMODEL_LOG}">{AUTO_RECOVERY_XPATH}</Select></Query></QueryList>'
+    )
+    namespace = TASK_XML_NAMESPACE
+    ET.register_namespace("", namespace)
+
+    def child(parent: ET.Element, tag: str, text: str | None = None, **attrs: str) -> ET.Element:
+        node = ET.SubElement(parent, f"{{{namespace}}}{tag}", attrs)
+        if text is not None:
+            node.text = text
+        return node
+
+    task = ET.Element(f"{{{namespace}}}Task", {"version": "1.4"})
+    info = child(task, "RegistrationInfo")
+    child(info, "Author", "claude-appx-restart")
+    child(
+        info,
+        "Description",
+        f"Claude AppX Auto-Recovery {__version__}: repairs the stale Container_Claude Job "
+        f"after Event 208 / {SHARE_VIOLATION_HEX} and starts Claude.",
+    )
+    child(info, "URI", f"\\{AUTO_RECOVERY_TASK_NAME}")
+    trigger = child(child(task, "Triggers"), "EventTrigger")
+    child(trigger, "Enabled", "true")
+    child(trigger, "Subscription", subscription)  # ElementTree escapes the embedded XML.
+    principal = child(child(task, "Principals"), "Principal", id="Author")
+    child(principal, "UserId", user_sid)
+    child(principal, "LogonType", "InteractiveToken")
+    child(principal, "RunLevel", "HighestAvailable")
+    settings = child(task, "Settings")
+    for tag, value in TASK_SETTINGS:
+        child(settings, tag, value)
+    exec_node = child(child(task, "Actions", Context="Author"), "Exec")
+    child(exec_node, "Command", str(executable))
+    child(exec_node, "Arguments", arguments)
+    child(exec_node, "WorkingDirectory", str(working_directory))
+    return '<?xml version="1.0" encoding="UTF-16"?>\n' + ET.tostring(task, encoding="unicode")
+
+
+def _register_task_xml(xml_text: str) -> None:
+    descriptor, path = tempfile.mkstemp(prefix="claude-restart-task-", suffix=".xml")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-16") as handle:
+            handle.write(xml_text)
+        completed = subprocess.run(
+            ["schtasks.exe", "/Create", "/TN", AUTO_RECOVERY_TASK_NAME, "/XML", path, "/F"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            **_NO_WINDOW,
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         raise RecoveryError(f"Could not register {AUTO_RECOVERY_TASK_NAME}: {detail}")
 
+
+def _delete_task() -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["schtasks.exe", "/Delete", "/TN", AUTO_RECOVERY_TASK_NAME, "/F"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+        **_NO_WINDOW,
+    )
+
+
+def install_auto_recovery(reporter: Reporter) -> None:
+    package = get_claude_package()
+    executable, arguments = task_launcher()
+    if IS_FROZEN and QUIET_EXE_SUFFIX not in executable.name:
+        reporter.emit(
+            "WARN",
+            f"{executable.stem}{QUIET_EXE_SUFFIX}{executable.suffix} was not found beside "
+            f"{executable.name}; automatic recovery will show a console window. "
+            "Extract the full release ZIP to avoid this.",
+        )
+    _register_task_xml(build_task_xml(executable, arguments, package.user_sid, app_location()))
+
     status = automation_task_status()
-    expected_arguments = f'"{script_path}" --event-triggered --yes --wait 30'
     valid = (
         status.get("Installed") is True
         and status.get("MultipleInstances") == "IgnoreNew"
         and status.get("LogonType") in ("Interactive", "InteractiveToken")
         and status.get("RunLevel") in ("Highest", "HighestAvailable")
-        and status.get("Subscription")
+        and status.get("DisallowStartIfOnBatteries") is False
+        and status.get("StopIfGoingOnBatteries") is False
+        and bool(status.get("Subscription"))
         and AUTO_RECOVERY_APPLICATION in str(status.get("Subscription"))
         and SHARE_VIOLATION_DECIMAL in str(status.get("Subscription"))
-        and os.path.normcase(str(status.get("Execute")).strip('"'))
-        == os.path.normcase(str(python_executable))
-        and str(status.get("Arguments")) == expected_arguments
+        and os.path.normcase(str(status.get("Execute")).strip('"')) == os.path.normcase(str(executable))
+        and str(status.get("Arguments")) == arguments
     )
     if not valid:
-        subprocess.run(
-            ["schtasks.exe", "/Delete", "/TN", AUTO_RECOVERY_TASK_NAME, "/F"],
-            capture_output=True,
-            check=False,
-        )
+        _delete_task()
         raise SafetyStop("The registered task did not preserve the reviewed trigger/action settings; it was removed.")
     reporter.emit(
         "INSTALLED",
         f"Task '{AUTO_RECOVERY_TASK_NAME}' watches Event 208 for {AUTO_RECOVERY_APPLICATION} / "
-        f"{SHARE_VIOLATION_HEX} and runs only while this user is logged on.",
+        f"{SHARE_VIOLATION_HEX}, runs only while this user is signed in, and also runs on battery power.",
     )
-    reporter.emit("ACTION", f"{python_executable} -> {script_path}")
+    reporter.emit("ACTION", build_task_action(executable, arguments))
     reporter.emit("PACKAGE", f"Current package verified: {package.package_full_name}")
 
 
@@ -1050,13 +1236,7 @@ def remove_auto_recovery(reporter: Reporter) -> None:
     if not status.get("Installed"):
         reporter.emit("NOT INSTALLED", f"Task '{AUTO_RECOVERY_TASK_NAME}' is already absent.")
         return
-    completed = subprocess.run(
-        ["schtasks.exe", "/Delete", "/TN", AUTO_RECOVERY_TASK_NAME, "/F"],
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
+    completed = _delete_task()
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         raise RecoveryError(f"Could not remove {AUTO_RECOVERY_TASK_NAME}: {detail}")
@@ -1074,22 +1254,31 @@ def show_auto_recovery_status(reporter: Reporter) -> int:
         f"logon={status.get('LogonType')}; instances={status.get('MultipleInstances')}.",
     )
     reporter.emit("ACTION", f"{status.get('Execute')} {status.get('Arguments')}")
+    on_battery = "yes" if status.get("DisallowStartIfOnBatteries") is False else "no"
+    reporter.emit(
+        "SETTINGS",
+        f"starts on battery={on_battery}; time limit={status.get('ExecutionTimeLimit') or 'default'}; "
+        f"priority={status.get('Priority')}.",
+    )
+    if status.get("Description"):
+        reporter.emit("DESCRIPTION", str(status.get("Description")))
     reporter.emit(
         "LAST RUN",
         f"{status.get('LastRunTime') or 'never'}; result={status.get('LastTaskResult')}",
     )
-    return 0
+    return EXIT_OK
 
 
 def appmodel_share_violations(package: PackageInfo, since: datetime) -> list[dict[str, object]]:
     start = _ps_single_quote(since.isoformat())
     package_name = _ps_single_quote(package.package_full_name)
     log_name = _ps_single_quote(APPMODEL_LOG)
+    event_ids = ",".join(str(event_id) for event_id in APP_ERROR_IDS)
     script = f"""
 $start = [DateTimeOffset]::Parse({start}).LocalDateTime
 $package = {package_name}
 $result = @(
-    Get-WinEvent -FilterHashtable @{{LogName={log_name}; Id=208,215; StartTime=$start}} -ErrorAction SilentlyContinue |
+    Get-WinEvent -FilterHashtable @{{LogName={log_name}; Id={event_ids}; StartTime=$start}} -ErrorAction SilentlyContinue |
     ForEach-Object {{
         $text = $_.ToXml() + "`n" + $_.Message
         if ($text.Contains($package) -and (
@@ -1118,11 +1307,19 @@ def launch_and_verify(package: PackageInfo, reporter: Reporter, wait_seconds: in
     aumid = f"{package.package_family_name}!{package.application_id}"
     started_at = datetime.now(timezone.utc)
     reporter.emit("LAUNCH", f"Starting shell:AppsFolder\\{aumid}")
-    subprocess.Popen(
-        ["explorer.exe", f"shell:AppsFolder\\{aumid}"],
+    # Explorer hands the activation to the running (unelevated) shell and exits, so the
+    # packaged app never inherits this process's elevated token.
+    explorer = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe"
+    process = subprocess.Popen(
+        [str(explorer), f"shell:AppsFolder\\{aumid}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **_NO_WINDOW,
     )
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
     deadline = time.monotonic() + wait_seconds
     windows: list[dict[str, object]] = []
     while time.monotonic() < deadline:
@@ -1253,6 +1450,13 @@ def historical_self_check(reporter: Reporter) -> bool:
 def run(args: argparse.Namespace, reporter: Reporter) -> int:
     package = get_claude_package()
     reporter.emit("PACKAGE", f"Installed: {package.package_full_name}")
+    installed_aumid = f"{package.package_family_name}!{package.application_id}"
+    if installed_aumid != AUTO_RECOVERY_APPLICATION:
+        reporter.emit(
+            "WARN",
+            f"Installed application id {installed_aumid} differs from the trigger identity "
+            f"{AUTO_RECOVERY_APPLICATION}; automatic recovery will not fire until the tool is updated.",
+        )
     if args.event_triggered:
         events = auto_recovery_events(package, minutes=10)
         if not events:
@@ -1302,41 +1506,42 @@ def run(args: argparse.Namespace, reporter: Reporter) -> int:
             reporter.emit("SAFE", "No exact older Claude AppX Job is present.")
         if args.scan:
             reporter.emit("DRY-RUN", "No processes were terminated and Claude was not launched.")
-            return 10 if stale else 0
+            return EXIT_STALE_FOUND if stale else EXIT_OK
         if args.event_triggered and not stale:
             reporter.emit(
                 "NO ACTION",
                 "The event matched, but no exact older Claude Job exists; automatic relaunch was suppressed.",
             )
-            return 0
+            return EXIT_OK
         if stale and not args.yes:
-            if not sys.stdin.isatty():
+            if not _stdin_is_interactive():
                 raise SafetyStop("Confirmation is required; rerun interactively or pass --yes.")
             answer = input("Type REPAIR to terminate only the verified stale Job member(s): ").strip()
             if answer != "REPAIR":
                 reporter.emit("CANCELLED", "No processes were terminated.")
-                return 2
+                return EXIT_SAFETY_STOP
 
         for job in stale:
-            details = validate_live_members(job, appinfo_pid)
+            validate_live_members(job, appinfo_pid, reporter)
             reporter.emit(
                 "REVALIDATED",
-                f"{job.name} has {len(details)} live member(s), all in this user session.",
+                f"{job.name} has {len(job.pids)} live member(s), all in this user session.",
             )
             terminate_exact_job(job)
-            reporter.emit("CLOSED", f"Terminated the exact stale Job and its {len(details)} member(s).")
+            reporter.emit("CLOSED", f"Terminated the exact stale Job and its {len(job.pids)} member(s).")
     finally:
         close_job_records(jobs)
 
     if stale:
         time.sleep(0.5)
-    return 0 if launch_and_verify(package, reporter, args.wait) else 1
+    return EXIT_OK if launch_and_verify(package, reporter, args.wait) else EXIT_ERROR
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repair the verified stale Claude AppX Job failure and start Claude Desktop."
     )
+    parser.add_argument("--version", action="version", version=f"ClaudeRestart {__version__}")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--scan",
@@ -1390,9 +1595,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _stdin_is_interactive() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _pause() -> None:
+    if sys.stdin is None or sys.stdout is None:
+        return
+    try:
+        input("Press Enter to close...")
+    except (EOFError, RuntimeError, OSError, ValueError):
+        pass
+
+
+def event_triggered_exit_code(exit_code: int) -> int:
+    """Map handled outcomes to 0 for Task Scheduler.
+
+    Task Scheduler renders small exit codes as Win32 errors (2 reads as "file not
+    found"), so an event-triggered run reports 0 for every outcome it handled and
+    explained in last-run.log; only an internal error stays non-zero.
+    """
+    return EXIT_INTERNAL_ERROR if exit_code == EXIT_INTERNAL_ERROR else EXIT_OK
+
+
 def main() -> int:
     reporter = Reporter()
-    exit_code = 1
+    args: argparse.Namespace | None = None
+    exit_code = EXIT_ERROR
     try:
         _require_windows()
         _configure_windows_apis()
@@ -1400,54 +1632,55 @@ def main() -> int:
         if args.wait < 3 or args.wait > 120:
             raise RecoveryError("--wait must be between 3 and 120 seconds.")
         if args.self_check:
-            exit_code = 0 if historical_self_check(reporter) else 1
-            return exit_code
-        if args.trace:
+            exit_code = EXIT_OK if historical_self_check(reporter) else EXIT_ERROR
+        elif args.trace:
             exit_code = trace_auto_recovery_events(reporter, args.minutes)
-            return exit_code
-        if args.automation_status:
+        elif args.automation_status:
             exit_code = show_auto_recovery_status(reporter)
-            return exit_code
-        if not is_admin() and not args.no_elevate:
+        elif args.event_triggered and not is_admin():
+            raise RecoveryError(
+                "The scheduled task is not running elevated; reinstall automatic recovery "
+                "from an administrator account."
+            )
+        elif not is_admin() and not args.no_elevate:
             if args.elevated:
                 raise RecoveryError("Elevation completed without an administrator token.")
             reporter.emit("UAC", "Requesting administrator access to inspect Appinfo's Job handles.")
             relaunch_elevated()
-            return 0
-        if not is_admin():
+            exit_code = EXIT_OK
+        elif not is_admin():
             raise RecoveryError("Administrator access is required to inspect Appinfo's Job handles.")
-        if args.install_automation:
+        elif args.install_automation:
             install_auto_recovery(reporter)
-            exit_code = 0
-            return exit_code
-        if args.remove_automation:
+            exit_code = EXIT_OK
+        elif args.remove_automation:
             remove_auto_recovery(reporter)
-            exit_code = 0
-            return exit_code
-        enable_debug_privilege()
-        exit_code = run(args, reporter)
-        return exit_code
+            exit_code = EXIT_OK
+        else:
+            enable_debug_privilege()
+            exit_code = run(args, reporter)
     except SafetyStop as exc:
         reporter.emit("SAFETY STOP", str(exc))
-        exit_code = 2
-        return exit_code
+        exit_code = EXIT_SAFETY_STOP
     except (RecoveryError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
         reporter.emit("ERROR", str(exc))
-        exit_code = 1
-        return exit_code
+        exit_code = EXIT_ERROR
+    except Exception:  # noqa: BLE001 - last resort so the failure reaches last-run.log
+        reporter.emit("INTERNAL ERROR", traceback.format_exc().strip())
+        exit_code = EXIT_INTERNAL_ERROR
     finally:
         try:
             log_path = reporter.save()
-            if reporter.lines and sys.stdout is not None:
+            if log_path is not None and sys.stdout is not None:
                 print(f"[LOG] {log_path}", flush=True)
         except OSError as exc:
             if sys.stderr is not None:
                 print(f"[LOG ERROR] {exc}", file=sys.stderr, flush=True)
-        if "args" in locals() and args.pause and (is_admin() or args.self_check or args.no_elevate):
-            try:
-                input("Press Enter to close...")
-            except EOFError:
-                pass
+        if args is not None and args.pause and (is_admin() or args.self_check or args.no_elevate):
+            _pause()
+    if args is not None and args.event_triggered:
+        return event_triggered_exit_code(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

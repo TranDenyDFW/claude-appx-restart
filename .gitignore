@@ -6,6 +6,11 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.venv-build/
+
+# PyInstaller output (the committed ClaudeRestart.spec is the build input)
+build/
+dist/
 
 # Editors and operating systems
 .idea/
