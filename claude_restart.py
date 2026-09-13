@@ -20,10 +20,12 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -31,10 +33,11 @@ import tempfile
 import time
 import traceback
 from typing import Iterable
+import uuid
 import xml.etree.ElementTree as ET
 
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 APP_NAME = "Claude"
 EXPECTED_PACKAGE_FAMILY = "Claude_pzs8sxrjxfjjc"
@@ -100,6 +103,21 @@ TASK_SETTINGS = (
 )
 LOG_FILE_NAME = "last-run.log"
 LOG_FALLBACK_DIRNAME = "ClaudeRestart"
+# The executables install automation from C:\Program Files\ClaudeRestart: the task runs them
+# with administrator rights, so they must live where only administrators can change them.
+INSTALL_DIRNAME = "ClaudeRestart"
+CONSOLE_EXE_NAME = "ClaudeRestart.exe"
+QUIET_EXE_NAME = "ClaudeRestart-quiet.exe"
+INSTALL_SUPPORT_FILES = (
+    "ClaudeRestart-launch.cmd",
+    "Install Automatic Recovery.cmd",
+    "Remove Automatic Recovery.cmd",
+    "Start Claude Safely.cmd",
+    "README.md",
+    "SHA256SUMS.txt",
+    "docs/windows-event-automation.md",
+)
+FOLDERID_PROGRAM_FILES = "{905e63b6-c1bf-494e-b29c-65b732d3d21a}"
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_SAFETY_STOP = 2
@@ -108,6 +126,7 @@ EXIT_STALE_FOUND = 10
 
 
 if os.name == "nt":
+    ole32 = ctypes.WinDLL("ole32")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     ntdll = ctypes.WinDLL("ntdll")
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -177,6 +196,24 @@ class TOKEN_PRIVILEGES(ctypes.Structure):
 
 class FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+    @classmethod
+    def from_string(cls, text: str) -> "GUID":
+        value = uuid.UUID(text)
+        guid = cls()
+        guid.Data1, guid.Data2, guid.Data3 = value.fields[0], value.fields[1], value.fields[2]
+        for index, byte in enumerate(value.bytes[8:]):
+            guid.Data4[index] = byte
+        return guid
 
 
 class SHELLEXECUTEINFOW(ctypes.Structure):
@@ -368,6 +405,15 @@ def _configure_windows_apis() -> None:
     shell32.ShellExecuteW.restype = ctypes.c_void_p
     shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
     shell32.ShellExecuteExW.restype = wintypes.BOOL
+    shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(GUID),
+        wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
@@ -416,6 +462,124 @@ def app_location() -> Path:
 def log_fallback_dir() -> Path:
     root = os.environ.get("LOCALAPPDATA")
     return (Path(root) if root else app_location()) / LOG_FALLBACK_DIRNAME
+
+
+def program_files_dir() -> Path:
+    """Return the Program Files folder from the Windows shell.
+
+    Environment variables are deliberately not used: a non-elevated caller could set
+    %ProgramFiles% before the elevated relaunch and redirect the install into a folder
+    it can write.
+    """
+    folder = GUID.from_string(FOLDERID_PROGRAM_FILES)
+    path_pointer = ctypes.c_void_p()
+    result = shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path_pointer))
+    try:
+        if result != 0 or not path_pointer.value:
+            raise RecoveryError(f"SHGetKnownFolderPath(ProgramFiles) failed with HRESULT 0x{result & 0xFFFFFFFF:08X}.")
+        return Path(ctypes.wstring_at(path_pointer.value))
+    finally:
+        if path_pointer.value:
+            ole32.CoTaskMemFree(path_pointer)
+
+
+def install_dir() -> Path:
+    return program_files_dir() / INSTALL_DIRNAME
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def install_layout() -> list[tuple[Path, str, bool]]:
+    """Return (source file, path inside the install folder, required) for the running release."""
+    console = app_entry()
+    twin = console.with_name(f"{console.stem}{QUIET_EXE_SUFFIX}{console.suffix}")
+    layout = [(console, CONSOLE_EXE_NAME, True), (twin, QUIET_EXE_NAME, True)]
+    layout.extend((console.parent / relative, relative, False) for relative in INSTALL_SUPPORT_FILES)
+    return layout
+
+
+def copy_to_install_dir(reporter: Reporter, target: Path) -> Path:
+    """Copy the running release into target and return it; nothing is copied if a check fails."""
+    source = app_location()
+    if _same_path(source, target):
+        for name in (CONSOLE_EXE_NAME, QUIET_EXE_NAME):
+            if not (target / name).is_file():
+                raise RecoveryError(f"{name} is missing from {target}; reinstall from the full release ZIP.")
+        reporter.emit("LOCATION", f"Already running from {target}; no files to copy.")
+        return target
+    layout = install_layout()
+    for source_file, relative, required in layout:
+        if required and not source_file.is_file():
+            raise RecoveryError(
+                f"{source_file.name} was not found beside {app_entry().name}; extract the full release ZIP "
+                "and install again. Nothing was changed."
+            )
+    copied = 0
+    for source_file, relative, _required in layout:
+        if not source_file.is_file():
+            continue
+        destination = target / relative
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_file, destination)
+        except OSError as exc:
+            raise RecoveryError(
+                f"Could not copy {relative} into {target}: {exc}. If automatic recovery is running right "
+                "now, wait a minute and install again."
+            ) from exc
+        if _file_sha256(source_file) != _file_sha256(destination):
+            raise RecoveryError(f"The copy of {relative} in {target} does not match the original; install again.")
+        copied += 1
+    reporter.emit("COPIED", f"Installed {copied} file(s) into {target}, which only administrators can change.")
+    reporter.emit("NOTE", f"Automatic recovery no longer uses {source}; you can delete that folder.")
+    return target
+
+
+def remove_install_dir(reporter: Reporter, target: Path) -> None:
+    """Delete the files --install-automation placed in target, leaving anything else untouched."""
+    if not target.is_dir():
+        return
+    if _same_path(app_location(), target):
+        reporter.emit(
+            "NOTE",
+            f"{target} was left in place because this program is running from it; delete that folder to finish uninstalling.",
+        )
+        return
+    problems: list[str] = []
+    relatives = [CONSOLE_EXE_NAME, QUIET_EXE_NAME, *INSTALL_SUPPORT_FILES, LOG_FILE_NAME]
+    for relative in relatives:
+        path = target / relative
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            problems.append(f"{relative}: {exc}")
+    subfolders = {(target / relative).parent for relative in relatives} - {target}
+    for folder in sorted(subfolders, key=lambda item: len(item.parts), reverse=True):
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
+    try:
+        target.rmdir()
+    except OSError:
+        pass
+    if problems:
+        reporter.emit("WARN", f"Could not delete some files in {target}: " + "; ".join(problems))
+    elif target.exists():
+        reporter.emit("NOTE", f"Removed the installed files; {target} still holds other files, so it was kept.")
+    else:
+        reporter.emit("REMOVED", f"Deleted {target}.")
 
 
 def _interpreter_for_task() -> Path:
@@ -1274,15 +1438,19 @@ def install_auto_recovery(reporter: Reporter) -> None:
     problem = trigger_identity_problem(package)
     if problem:
         raise SafetyStop(problem + " Automation was not installed.")
-    executable, arguments = task_launcher()
-    if IS_FROZEN and QUIET_EXE_SUFFIX not in executable.name:
+    if IS_FROZEN:
+        location = copy_to_install_dir(reporter, install_dir())
+        executable, arguments = location / QUIET_EXE_NAME, TASK_ARGUMENTS
+    else:
         reporter.emit(
             "WARN",
-            f"{executable.stem}{QUIET_EXE_SUFFIX}{executable.suffix} was not found beside "
-            f"{executable.name}; automatic recovery will show a console window. "
-            "Extract the full release ZIP to avoid this.",
+            "Running from source, so the task runs this interpreter and script from where they are now. "
+            "Install with the release executables to run automatic recovery from Program Files, where only "
+            "administrators can change the files it runs.",
         )
-    _register_task_xml(build_task_xml(executable, arguments, package.user_sid, app_location()))
+        location = app_location()
+        executable, arguments = task_launcher()
+    _register_task_xml(build_task_xml(executable, arguments, package.user_sid, location))
 
     status = automation_task_status()
     valid = (
@@ -1312,14 +1480,16 @@ def install_auto_recovery(reporter: Reporter) -> None:
 
 def remove_auto_recovery(reporter: Reporter) -> None:
     status = automation_task_status()
-    if not status.get("Installed"):
+    if status.get("Installed"):
+        completed = _delete_task()
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RecoveryError(f"Could not remove {AUTO_RECOVERY_TASK_NAME}: {detail}")
+        reporter.emit("REMOVED", f"Task '{AUTO_RECOVERY_TASK_NAME}' was removed.")
+    else:
         reporter.emit("NOT INSTALLED", f"Task '{AUTO_RECOVERY_TASK_NAME}' is already absent.")
-        return
-    completed = _delete_task()
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip()
-        raise RecoveryError(f"Could not remove {AUTO_RECOVERY_TASK_NAME}: {detail}")
-    reporter.emit("REMOVED", f"Task '{AUTO_RECOVERY_TASK_NAME}' was removed.")
+    if IS_FROZEN:
+        remove_install_dir(reporter, install_dir())
 
 
 def show_auto_recovery_status(reporter: Reporter) -> int:

@@ -51,7 +51,21 @@ is deleted again.
 | `StopIfGoingOnBatteries` | `false` | Unplugging must not abort a repair |
 | `ExecutionTimeLimit` | `PT5M` | A stuck run is terminated after five minutes |
 | `Priority` | `5` | Slightly above the below-normal default so the repair is not starved |
-| Action | `"<folder>\ClaudeRestart-quiet.exe" --event-triggered --yes --wait 30` (or `pythonw.exe "<folder>\claude_restart.py" ...` from source) | The windowed build runs with no console window |
+| Action | `"C:\Program Files\ClaudeRestart\ClaudeRestart-quiet.exe" --event-triggered --yes --wait 30` (or `pythonw.exe "<folder>\claude_restart.py" ...` from source) | The windowed build runs with no console window, from a folder only administrators can change |
+
+### Install location
+
+The task runs with administrator rights, so the executables install into
+`C:\Program Files\ClaudeRestart` before the task is registered. The folder is
+resolved with `SHGetKnownFolderPath(FOLDERID_ProgramFiles)` rather than
+`%ProgramFiles%`, so a non-elevated caller cannot redirect the install by setting an
+environment variable before the elevation prompt. Both executables are required;
+each copy is compared byte for byte with its source, and a failed copy stops before
+the task is touched. The files inherit the Program Files permissions, which let
+standard users read and run them but not change them. `--remove-automation` deletes
+only the files the installer placed there and removes the folder when nothing else
+remains. Running from source skips the copy and warns that the task will run the
+interpreter and script from their current location.
 
 `--automation-status` prints the same settings, including whether the task
 starts on battery and keeps running when the machine is unplugged, together

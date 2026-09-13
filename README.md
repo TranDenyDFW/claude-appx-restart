@@ -14,7 +14,7 @@ Install automatic recovery once and keep using your normal Claude shortcut, or r
 ## Download
 
 1. Open the [latest release](https://github.com/TranDenyDFW/claude-appx-restart/releases/latest).
-2. Download `ClaudeRestart-vX.Y.Z-win-x64.zip` and extract it to a permanent folder, for example `C:\Tools\ClaudeRestart`.
+2. Download `ClaudeRestart-vX.Y.Z-win-x64.zip` and extract it anywhere, for example your Downloads folder. Installing copies what it needs into `C:\Program Files\ClaudeRestart`.
 
 The ZIP contains:
 
@@ -22,24 +22,26 @@ The ZIP contains:
 |---|---|
 | `ClaudeRestart.exe` | The tool. Shows its progress and result in a console window. |
 | `ClaudeRestart-quiet.exe` | The same tool without a console window. The scheduled task runs this one, so an automatic recovery is invisible. |
-| `Install Automatic Recovery.cmd` | Registers the scheduled task (one UAC prompt). |
+| `Install Automatic Recovery.cmd` | Copies the program into `C:\Program Files\ClaudeRestart` and registers the scheduled task (one UAC prompt). |
 | `Start Claude Safely.cmd` | Repairs and starts Claude on demand (one UAC prompt). |
-| `Remove Automatic Recovery.cmd` | Removes the scheduled task (one UAC prompt). |
+| `Remove Automatic Recovery.cmd` | Removes the scheduled task and the copy in `C:\Program Files\ClaudeRestart` (one UAC prompt). |
 | `ClaudeRestart-launch.cmd` | Shared dispatcher the three launchers call: runs the exe beside it, or the Python source. |
 
 The executables are not code-signed, so Windows SmartScreen may show **Windows protected your PC** the first time. Choose **More info** and then **Run anyway**, or right-click the file, open **Properties**, and tick **Unblock**. `SHA256SUMS.txt` on the release page lists the checksums of every file.
 
 ## Install automatic recovery
 
-1. Double-click **Install Automatic Recovery.cmd**.
+1. Double-click **Install Automatic Recovery.cmd** in the extracted folder.
 2. Approve the User Account Control (UAC) prompt.
 3. Keep opening Claude from your normal shortcut.
 
-Windows creates a scheduled task named `Claude AppX Auto-Recovery`. It fires when Windows records this exact startup failure (AppModel-Runtime Event 208 for Claude with error `0x80070020`), runs only while you are signed in, also runs on battery power, and is limited to one instance and five minutes per run. When the failure occurs, the task closes only the verified obsolete Claude Job and opens the installed version of Claude.
+The installer copies the program into `C:\Program Files\ClaudeRestart` and creates a scheduled task named `Claude AppX Auto-Recovery` that runs `ClaudeRestart-quiet.exe` from there. The task runs with administrator rights, so it only runs files from a folder that only administrators can change; a program running without administrator rights cannot swap them. You can delete the extracted folder afterwards.
+
+The task fires when Windows records this exact startup failure (AppModel-Runtime Event 208 for Claude with error `0x80070020`), runs only while you are signed in, also runs on battery power, and is limited to one instance and five minutes per run. When the failure occurs, the task closes only the verified obsolete Claude Job and opens the installed version of Claude.
 
 The error dialog can still appear briefly, because Windows records the failure before recovery starts.
 
-Keep the folder where you extracted the files: the task points at `ClaudeRestart-quiet.exe` in that folder. If you move the folder, run **Install Automatic Recovery.cmd** again.
+To upgrade, extract a newer release and run its **Install Automatic Recovery.cmd**. It replaces the copy in `C:\Program Files\ClaudeRestart` and re-registers the task. If a recovery happens to be running at that moment, the copy fails without changing anything; wait a minute and run it again.
 
 ## Start Claude without automatic recovery
 
@@ -49,11 +51,11 @@ The launcher prints `GREEN` after it finds a visible Claude window and confirms 
 
 ## Remove automatic recovery
 
-Double-click **Remove Automatic Recovery.cmd** and approve the UAC prompt. This removes the scheduled task without changing Claude.
+Double-click **Remove Automatic Recovery.cmd** and approve the UAC prompt. This removes the scheduled task and deletes the files the installer placed in `C:\Program Files\ClaudeRestart`, without changing Claude. If you run it from `C:\Program Files\ClaudeRestart` itself, the task is removed but the folder stays, because a program cannot delete itself; delete the folder afterwards.
 
 ## Check the status or recent errors
 
-Open a terminal in the folder and run one of these commands. None of them changes anything, and only `--scan` asks for UAC.
+Open a terminal in `C:\Program Files\ClaudeRestart` (or the extracted folder) and run one of these commands. None of them changes anything, and only `--scan` asks for UAC.
 
 ```powershell
 # Is automatic recovery installed, and how did it last run?
@@ -68,7 +70,7 @@ Open a terminal in the folder and run one of these commands. None of them change
 .\ClaudeRestart.exe --version
 ```
 
-Every run writes `last-run.log` next to the executable, or to `%LOCALAPPDATA%\ClaudeRestart\last-run.log` when that folder is read-only.
+Every run writes `last-run.log` next to the executable that ran, or to `%LOCALAPPDATA%\ClaudeRestart\last-run.log` when that folder is read-only. Automatic recovery therefore logs to `C:\Program Files\ClaudeRestart\last-run.log`, while status and trace commands run without administrator rights log to `%LOCALAPPDATA%\ClaudeRestart\last-run.log`.
 
 Exit codes: `0` success, `1` error, `2` safety stop (nothing was changed), `3` internal error (details in the log), `10` `--scan` or `--trace` found something. A scheduled run reports `0` to Task Scheduler for every outcome it handled, so read `last-run.log` for the reason; `3` there means an internal error.
 
@@ -82,7 +84,7 @@ py -3 .\claude_restart.py --trace --minutes 180
 py -3 .\claude_restart.py --install-automation
 ```
 
-The three `.cmd` launchers call `ClaudeRestart-launch.cmd`, which runs `ClaudeRestart.exe` when it is next to them and falls back to `py -3` or `python.exe` otherwise. Their exit code is the elevated run's real result, because the tool waits for the administrator process it starts. When installed from source, the scheduled task runs `pythonw.exe` so it has no console window.
+The three `.cmd` launchers call `ClaudeRestart-launch.cmd`, which runs `ClaudeRestart.exe` when it is next to them and falls back to `py -3` or `python.exe` otherwise. Their exit code is the elevated run's real result, because the tool waits for the administrator process it starts. When installed from source, the scheduled task runs `pythonw.exe` so it has no console window. A source install is not copied into Program Files: the task runs the interpreter and script from where they are, so prefer the release executables unless both live in folders only administrators can change.
 
 ## What the tool can close
 
