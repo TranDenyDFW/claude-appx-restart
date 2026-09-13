@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import ctypes
 from pathlib import Path
 import subprocess
 import sys
@@ -211,15 +212,59 @@ class TaskXmlTests(unittest.TestCase):
 
 
 class MemberValidationTests(unittest.TestCase):
-    def test_partition_treats_an_exited_member_as_benign(self) -> None:
-        exited = app.ProcessInfo(200, "<exited or inaccessible>", "", "", None, None)
-        same = app.ProcessInfo(201, "claude.exe", r"C:\x\claude.exe", "", 1, 5)
-        foreign = app.ProcessInfo(202, "claude.exe", r"C:\x\claude.exe", "", 2, 5)
-        live_unknown_session = app.ProcessInfo(203, "claude.exe", r"C:\x\claude.exe", "", None, 5)
-        self.assertEqual(app._partition_members([exited, same], 1), ([200], []))
-        self.assertEqual(app._partition_members([exited, same, foreign], 1), ([200], [202]))
-        self.assertEqual(app._partition_members([live_unknown_session], 1), ([], [203]))
-        self.assertEqual(app._partition_members([same], None), ([], [201]))
+    OPAQUE = app.ProcessInfo(200, "<exited or inaccessible>", "", "", None, None)
+    SAME = app.ProcessInfo(201, "claude.exe", r"C:\x\claude.exe", "", 1, 5)
+    FOREIGN = app.ProcessInfo(202, "claude.exe", r"C:\x\claude.exe", "", 2, 5)
+    LIVE_UNKNOWN_SESSION = app.ProcessInfo(203, "claude.exe", r"C:\x\claude.exe", "", None, 5)
+
+    def test_member_the_kernel_no_longer_lists_counts_as_exited(self) -> None:
+        self.assertEqual(
+            app._partition_members([self.OPAQUE, self.SAME], 1, still_in_job=[201]),
+            ([200], []),
+        )
+
+    def test_opaque_member_still_in_the_job_stops_the_repair(self) -> None:
+        # Fail closed: the kernel still lists PID 200, so it is live but unverifiable.
+        self.assertEqual(
+            app._partition_members([self.OPAQUE, self.SAME], 1, still_in_job=[200, 201]),
+            ([], [200]),
+        )
+
+    def test_foreign_or_unknown_sessions_are_never_exited(self) -> None:
+        self.assertEqual(app._partition_members([self.SAME, self.FOREIGN], 1, still_in_job=[201, 202]), ([], [202]))
+        self.assertEqual(app._partition_members([self.LIVE_UNKNOWN_SESSION], 1, still_in_job=[203]), ([], [203]))
+        self.assertEqual(app._partition_members([self.LIVE_UNKNOWN_SESSION], 1, still_in_job=[]), ([], [203]))
+        self.assertEqual(app._partition_members([self.SAME], None, still_in_job=[201]), ([], [201]))
+
+
+class TriggerIdentityTests(unittest.TestCase):
+    def package(self, application_id: str) -> app.PackageInfo:
+        return app.PackageInfo(
+            "Claude",
+            "1.52386.3.0",
+            "Claude_1.52386.3.0_x64__pzs8sxrjxfjjc",
+            app.EXPECTED_PACKAGE_FAMILY,
+            r"C:\Program Files\WindowsApps\fixture",
+            application_id,
+            "S-1-5-21-1111111111-2222222222-3333333333-1001",
+        )
+
+    def test_matching_identity_has_no_problem(self) -> None:
+        self.assertIsNone(app.trigger_identity_problem(self.package("Claude")))
+
+    def test_changed_identity_is_reported(self) -> None:
+        problem = app.trigger_identity_problem(self.package("ClaudeApp"))
+        self.assertIn("Claude_pzs8sxrjxfjjc!ClaudeApp", problem)
+        self.assertIn(app.AUTO_RECOVERY_APPLICATION, problem)
+
+
+class ElevationTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32" and ctypes.sizeof(ctypes.c_void_p) == 8, "x64 Windows layout")
+    def test_shellexecuteinfo_layout_matches_win64(self) -> None:
+        self.assertEqual(ctypes.sizeof(app.SHELLEXECUTEINFOW), 112)
+
+    def test_reporter_persists_by_default(self) -> None:
+        self.assertTrue(app.Reporter().persist)
 
 
 class MainHardeningTests(unittest.TestCase):

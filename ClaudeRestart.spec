@@ -11,12 +11,18 @@ Builds two self-contained (onefile) executables from the same analysis:
 Run: python -m PyInstaller --clean --noconfirm ClaudeRestart.spec  (or py -3 build.py)
 """
 
+import importlib.util
 import re
 from pathlib import Path
 
 ROOT = Path(SPECPATH)
 SOURCE = ROOT / "claude_restart.py"
-VERSION = re.search(r'^__version__\s*=\s*"([^"]+)"', SOURCE.read_text(encoding="utf-8"), re.M).group(1)
+
+# build.py owns version parsing; load it by path so the module name cannot collide.
+_build_spec = importlib.util.spec_from_file_location("claude_restart_build", ROOT / "build.py")
+_build = importlib.util.module_from_spec(_build_spec)
+_build_spec.loader.exec_module(_build)
+VERSION = _build.read_version()
 _numbers = [int(part) for part in re.findall(r"\d+", VERSION)][:4]
 VERSION_TUPLE = tuple(_numbers + [0] * (4 - len(_numbers)))
 ICON = str(ROOT / "assets" / "ClaudeRestart.ico")

@@ -54,7 +54,10 @@ is deleted again.
 | Action | `"<folder>\ClaudeRestart-quiet.exe" --event-triggered --yes --wait 30` (or `pythonw.exe "<folder>\claude_restart.py" ...` from source) | The windowed build runs with no console window |
 
 `--automation-status` prints the same settings, including whether the task
-starts on battery, together with the last run time and result.
+starts on battery and keeps running when the machine is unplugged, together
+with the last run time and result. `--install-automation` refuses to register
+the task when the installed Claude application id no longer matches the
+trigger identity, since such a task could never fire.
 
 ## Recovery flow
 
