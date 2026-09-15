@@ -344,9 +344,11 @@ def main() -> int:
             if args.elevated:
                 raise RecoveryError("Elevation completed without an administrator token.")
             reporter.emit("UAC", "Requesting administrator access to inspect Appinfo's Job handles.")
-            reporter.persist = False  # the elevated child owns last-run.log for this run
-            exit_code = relaunch_elevated()
-            reporter.emit("ELEVATED", f"The administrator run finished with exit code {exit_code}; see last-run.log.")
+            # The parent keeps its own log until the child proves it wrote one, so a
+            # cancelled prompt or a failed launch still explains itself on disk.
+            exit_code = relaunch_elevated(reporter)
+            if not reporter.persist:
+                reporter.emit("ELEVATED", f"The administrator run finished with exit code {exit_code}; see last-run.log.")
         elif not winapi.is_admin():
             raise RecoveryError("Administrator access is required to inspect Appinfo's Job handles.")
         elif args.install_automation:
@@ -369,7 +371,7 @@ def main() -> int:
         exit_code = EXIT_INTERNAL_ERROR
     finally:
         try:
-            log_path = reporter.save() if reporter.persist else None
+            log_path = reporter.save(guard=reporter.log_guard) if reporter.persist else None
             if log_path is not None and sys.stdout is not None:
                 print(f"[LOG] {log_path}", flush=True)
         except OSError as exc:

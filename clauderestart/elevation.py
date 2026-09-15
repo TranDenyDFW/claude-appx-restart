@@ -8,9 +8,9 @@ import os
 import subprocess
 import sys
 
-from . import winapi
+from . import payload, winapi
 from .errors import RecoveryError
-from .reporting import app_location
+from .reporting import Reporter, app_location, log_fingerprint
 from .task import launcher_command
 
 
@@ -22,12 +22,21 @@ def elevation_request(argv: list[str]) -> tuple[str, str, str]:
     return str(executable), subprocess.list2cmdline(parts), str(app_location())
 
 
-def relaunch_elevated() -> int:
+def relaunch_elevated(reporter: Reporter | None = None) -> int:
     """Re-run this tool elevated (one UAC prompt), wait for it, and return its exit code.
 
     Waiting lets the .cmd launchers and scripted callers see the elevated run's real
     result instead of the hand-off parent's.
+
+    The parent keeps writing its own log until a child has actually run and left one.
+    Every way the child can fail to start, including a cancelled prompt, a launch
+    failure, a missing process handle, a failed wait and a failed exit code, therefore
+    ends with a diagnostic on disk rather than silence.
     """
+    log_path = app_location() / payload.LOG_FILE_NAME
+    before = log_fingerprint(log_path)
+    if reporter is not None:
+        reporter.log_guard = before
     target, parameters, workdir = elevation_request(sys.argv[1:])
     if winapi.is_frozen():
         # PyInstaller (>= 6.9) must give the child its own extraction directory rather
@@ -51,13 +60,27 @@ def relaunch_elevated() -> int:
     if not handle:
         raise RecoveryError("Administrator elevation started, but Windows returned no process handle.")
     try:
-        winapi.kernel32.WaitForSingleObject(wintypes.HANDLE(handle), winapi.INFINITE)
+        waited = winapi.kernel32.WaitForSingleObject(wintypes.HANDLE(handle), winapi.INFINITE)
+        if int(waited) == winapi.WAIT_FAILED:
+            raise winapi.winerror("WaitForSingleObject")
         exit_code = wintypes.DWORD()
         if not winapi.kernel32.GetExitCodeProcess(wintypes.HANDLE(handle), ctypes.byref(exit_code)):
             raise winapi.winerror("GetExitCodeProcess")
-        return int(exit_code.value)
+        code = int(exit_code.value)
     finally:
         winapi.close_handle(handle)
+    if reporter is not None:
+        if log_fingerprint(log_path) != before:
+            # The child left its own result, so the parent's hand-off lines must not
+            # replace it.
+            reporter.persist = False
+        else:
+            reporter.emit(
+                "ELEVATED",
+                f"The administrator run finished with exit code {code}, but left no log beside this program. "
+                "An over the shoulder elevation logs under the administrator account instead.",
+            )
+    return code
 
 
 def enable_debug_privilege() -> None:

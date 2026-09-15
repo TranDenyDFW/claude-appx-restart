@@ -46,6 +46,8 @@ BROKEN_SUFFIX = ".broken"
 LEGACY_ROOT_FILES = (CONSOLE_EXE_NAME, QUIET_EXE_NAME) + INSTALL_SUPPORT_FILES + ("last-run.log",)
 LEGACY_ROOT_DIRS = ("docs",)
 LOG_FILE_NAME = "last-run.log"
+# Where a parent's hand-off diagnostic goes when the child's log must not be replaced.
+PARENT_LOG_FILE_NAME = "last-run.parent.log"
 LOG_FALLBACK_DIRNAME = "ClaudeRestart"
 
 TASK_NAME = "Claude AppX Auto-Recovery"
