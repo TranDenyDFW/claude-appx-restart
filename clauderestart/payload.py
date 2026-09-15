@@ -32,7 +32,19 @@ CHECKSUMS_NAME = "SHA256SUMS.txt"
 # v1.0.2 install layout (flat, directly inside the install folder).
 INSTALL_SUPPORT_FILES = LAUNCHER_FILES + ("README.md", CHECKSUMS_NAME, "docs/windows-event-automation.md")
 
+# What a versioned install copies beside the executables. SHA256SUMS.txt is deliberately
+# absent: it is a convenience for people, and the installer never reads it.
+SUPPORT_FILES = RELEASE_FILES
+
 INSTALL_DIRNAME = "ClaudeRestart"
+VERSIONS_DIRNAME = "versions"
+MANIFEST_NAME = "install-manifest.json"
+STAGING_SUFFIX = ".staging"
+BROKEN_SUFFIX = ".broken"
+
+# The flat v1.0.2 layout, removed once a versioned install has replaced it.
+LEGACY_ROOT_FILES = (CONSOLE_EXE_NAME, QUIET_EXE_NAME) + INSTALL_SUPPORT_FILES + ("last-run.log",)
+LEGACY_ROOT_DIRS = ("docs",)
 LOG_FILE_NAME = "last-run.log"
 LOG_FALLBACK_DIRNAME = "ClaudeRestart"
 

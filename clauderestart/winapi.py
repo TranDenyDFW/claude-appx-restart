@@ -7,6 +7,7 @@ A leaf module: it imports only clauderestart.errors. Other modules write
 
 from __future__ import annotations
 
+import collections
 import ctypes
 from ctypes import wintypes
 import os
@@ -59,6 +60,40 @@ FILE_ATTRIBUTE_TAG_INFO = 9
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 LONG_PATH_PREFIX = "\\\\?\\"
 LONG_PATH_UNC_PREFIX = "\\\\?\\UNC\\"
+
+# Security descriptors, ACLs, and the access bits that amount to write access.
+SE_FILE_OBJECT = 1
+OWNER_SECURITY_INFORMATION = 0x00000001
+GROUP_SECURITY_INFORMATION = 0x00000002
+DACL_SECURITY_INFORMATION = 0x00000004
+PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+SDDL_REVISION_1 = 1
+SE_DACL_PRESENT = 0x0004
+SE_DACL_PROTECTED = 0x1000
+ACL_SIZE_INFORMATION_CLASS = 2
+ACCESS_ALLOWED_ACE_TYPE = 0x00
+ACCESS_DENIED_ACE_TYPE = 0x01
+OBJECT_INHERIT_ACE = 0x01
+CONTAINER_INHERIT_ACE = 0x02
+INHERIT_ONLY_ACE = 0x08
+INHERITED_ACE = 0x10
+DELETE = 0x00010000
+READ_CONTROL_RIGHT = 0x00020000
+WRITE_DAC = 0x00040000
+WRITE_OWNER = 0x00080000
+FILE_WRITE_DATA = 0x00000002
+FILE_APPEND_DATA = 0x00000004
+FILE_WRITE_EA = 0x00000010
+FILE_WRITE_ATTRIBUTES = 0x00000100
+FILE_DELETE_CHILD = 0x00000040
+GENERIC_WRITE_MASK = 0x40000000
+GENERIC_ALL_MASK = 0x10000000
+MAXIMUM_ALLOWED = 0x02000000
+FILE_ALL_ACCESS = 0x001F01FF
+FILE_GENERIC_READ_EXECUTE = 0x001200A9
+SE_TAKE_OWNERSHIP_NAME = "SeTakeOwnershipPrivilege"
+SE_RESTORE_NAME = "SeRestorePrivilege"
+SE_DEBUG_NAME = "SeDebugPrivilege"
 
 
 if os.name == "nt":
@@ -333,6 +368,67 @@ def configure() -> None:
     ]
     version.VerQueryValueW.restype = wintypes.BOOL
 
+    # These two report failure through their RETURN VALUE (ERROR_SUCCESS or a Win32
+    # code), the opposite of the BOOL APIs above, so they are never wrapped with the
+    # "if not fn(): raise" idiom.
+    advapi32.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.SetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetSecurityInfo.restype = wintypes.DWORD
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, wintypes.LPVOID, wintypes.DWORD, ctypes.c_int]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.IsValidSid.argtypes = [ctypes.c_void_p]
+    advapi32.IsValidSid.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+
 
 def is_frozen() -> bool:
     """Return True inside a PyInstaller executable (read at call time; tests patch this)."""
@@ -362,6 +458,191 @@ class FILE_ATTRIBUTE_TAG_INFORMATION(ctypes.Structure):
     _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
 
 
+class ACL_SIZE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("AceCount", wintypes.DWORD),
+        ("AclBytesInUse", wintypes.DWORD),
+        ("AclBytesFree", wintypes.DWORD),
+    ]
+
+
+class ACE_HEADER(ctypes.Structure):
+    _fields_ = [("AceType", ctypes.c_ubyte), ("AceFlags", ctypes.c_ubyte), ("AceSize", wintypes.WORD)]
+
+
+class ACCESS_ALLOWED_ACE(ctypes.Structure):
+    # Every non-object ACE type shares this prefix: header, mask, then the SID.
+    _fields_ = [("Header", ACE_HEADER), ("Mask", wintypes.DWORD), ("SidStart", wintypes.DWORD)]
+
+
+AceEntry = collections.namedtuple("AceEntry", "index type flags mask sid")
+SecurityInfo = collections.namedtuple("SecurityInfo", "owner control aces")
+
+
+def sid_to_string(sid_pointer: object) -> str:
+    """Convert a SID pointer to its S-1-... form, or an empty string."""
+    if not sid_pointer or not advapi32.IsValidSid(ctypes.c_void_p(sid_pointer)):
+        return ""
+    text = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p(sid_pointer), ctypes.byref(text)):
+        return ""
+    try:
+        return str(text.value or "")
+    finally:
+        kernel32.LocalFree(ctypes.cast(text, wintypes.HLOCAL))
+
+
+def _dacl_entries(dacl: object) -> list[AceEntry]:
+    """Read every ACE of a DACL, keeping the raw type so unknown types stay visible."""
+    if not dacl:
+        return []
+    sizes = ACL_SIZE_INFORMATION()
+    if not advapi32.GetAclInformation(
+        ctypes.c_void_p(dacl), ctypes.byref(sizes), ctypes.sizeof(sizes), ACL_SIZE_INFORMATION_CLASS
+    ):
+        raise winerror("GetAclInformation")
+    entries: list[AceEntry] = []
+    for index in range(int(sizes.AceCount)):
+        ace_pointer = ctypes.c_void_p()
+        if not advapi32.GetAce(ctypes.c_void_p(dacl), index, ctypes.byref(ace_pointer)):
+            raise winerror(f"GetAce({index})")
+        header = ACE_HEADER.from_address(ace_pointer.value)
+        ace_type = int(header.AceType)
+        flags = int(header.AceFlags)
+        mask = 0
+        sid = ""
+        if ace_type in (ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE):
+            ace = ACCESS_ALLOWED_ACE.from_address(ace_pointer.value)
+            mask = int(ace.Mask)
+            sid = sid_to_string(ace_pointer.value + ACCESS_ALLOWED_ACE.SidStart.offset)
+        entries.append(AceEntry(index, ace_type, flags, mask, sid))
+    return entries
+
+
+def read_security(handle: int) -> SecurityInfo:
+    """Read owner, control flags, and every DACL entry through an open handle."""
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    code = advapi32.GetSecurityInfo(
+        wintypes.HANDLE(handle),
+        SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        ctypes.byref(owner),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if code != 0:
+        raise RecoveryError(f"GetSecurityInfo failed: {ctypes.WinError(code)}")
+    try:
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not advapi32.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise winerror("GetSecurityDescriptorControl")
+        return SecurityInfo(sid_to_string(owner.value), int(control.value), _dacl_entries(dacl.value))
+    finally:
+        if descriptor.value:
+            kernel32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+
+def security_descriptor_from_sddl(sddl: str) -> ctypes.c_void_p:
+    """Build a security descriptor from an SDDL string; the caller frees it."""
+    descriptor = ctypes.c_void_p()
+    size = wintypes.ULONG()
+    ctypes.set_last_error(0)
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, SDDL_REVISION_1, ctypes.byref(descriptor), ctypes.byref(size)
+    ):
+        raise winerror("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+    return descriptor
+
+
+def read_sddl_security(sddl: str) -> SecurityInfo:
+    """Parse an SDDL string the same way a real object is read (used by tests)."""
+    descriptor = security_descriptor_from_sddl(sddl)
+    try:
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not advapi32.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise winerror("GetSecurityDescriptorControl")
+        present = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+        ):
+            raise winerror("GetSecurityDescriptorDacl")
+        owner = ctypes.c_void_p()
+        owner_defaulted = wintypes.BOOL()
+        if not advapi32.GetSecurityDescriptorOwner(descriptor, ctypes.byref(owner), ctypes.byref(owner_defaulted)):
+            raise winerror("GetSecurityDescriptorOwner")
+        entries = _dacl_entries(dacl.value) if present.value else []
+        return SecurityInfo(sid_to_string(owner.value), int(control.value), entries)
+    finally:
+        kernel32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+
+def apply_security_from_sddl(handle: int, sddl: str, *, owner: bool = True) -> None:
+    """Write the owner and a protected DACL from an SDDL string onto an open handle."""
+    descriptor = security_descriptor_from_sddl(sddl)
+    try:
+        present = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+        ):
+            raise winerror("GetSecurityDescriptorDacl")
+        owner_sid = ctypes.c_void_p()
+        owner_defaulted = wintypes.BOOL()
+        if owner and not advapi32.GetSecurityDescriptorOwner(
+            descriptor, ctypes.byref(owner_sid), ctypes.byref(owner_defaulted)
+        ):
+            raise winerror("GetSecurityDescriptorOwner")
+        information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+        if owner:
+            information |= OWNER_SECURITY_INFORMATION
+        code = advapi32.SetSecurityInfo(
+            wintypes.HANDLE(handle),
+            SE_FILE_OBJECT,
+            information,
+            owner_sid if owner else None,
+            None,
+            dacl,
+            None,
+        )
+        if code != 0:
+            raise RecoveryError(f"SetSecurityInfo failed: {ctypes.WinError(code)}")
+    finally:
+        kernel32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+
+def enable_privilege(name: str) -> None:
+    """Enable one privilege in this process token, or raise."""
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, ctypes.byref(token)
+    ):
+        raise winerror("OpenProcessToken")
+    try:
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+            raise winerror(f"LookupPrivilegeValueW({name})")
+        privileges = TOKEN_PRIVILEGES()
+        privileges.PrivilegeCount = 1
+        privileges.Privileges[0].Luid = luid
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+        ctypes.set_last_error(0)
+        if not advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(privileges), 0, None, None):
+            raise winerror("AdjustTokenPrivileges")
+        if ctypes.get_last_error() == ERROR_NOT_ALL_ASSIGNED:
+            raise RecoveryError(f"This token does not contain {name}.")
+    finally:
+        close_handle(int(token.value or 0))
+
+
 def canonical(path: object) -> str:
     """Return a path in the one form every comparison in this package uses."""
     return os.path.normcase(os.path.realpath(str(path)))
@@ -384,7 +665,7 @@ class LockedFile:
     """
 
     def __init__(self, path: object, *, directory: bool = False, open_reparse_point: bool = False,
-                 share: int = FILE_SHARE_READ) -> None:
+                 share: int = FILE_SHARE_READ, access: int | None = None) -> None:
         import msvcrt
 
         flags = FILE_ATTRIBUTE_NORMAL
@@ -392,10 +673,13 @@ class LockedFile:
             flags |= FILE_FLAG_BACKUP_SEMANTICS
         if open_reparse_point:
             flags |= FILE_FLAG_OPEN_REPARSE_POINT
+        # Reading a security descriptor needs READ_CONTROL; writing one needs WRITE_DAC,
+        # and setting an owner needs WRITE_OWNER, so a repair asks for those explicitly.
+        wanted = GENERIC_READ | READ_CONTROL if access is None else access
         ctypes.set_last_error(0)
         raw = kernel32.CreateFileW(
             str(path),
-            GENERIC_READ | READ_CONTROL,
+            wanted,
             share,
             None,
             OPEN_EXISTING,
@@ -406,10 +690,11 @@ class LockedFile:
             raise winerror(f"CreateFileW({path})")
         self.path = str(path)
         self.directory = directory
+        self.access = wanted
         self._closed = False
         self._raw: int | None = None
         self.fileobj = None
-        if directory:
+        if directory or not wanted & GENERIC_READ:
             # A directory handle cannot back a Python file object, and nothing reads
             # bytes from one: it exists for identity and security checks only. The raw
             # handle is the single owner in this mode.

@@ -75,6 +75,18 @@ def build_task_action(executable: Path, arguments: str) -> str:
     return f'"{executable}" {arguments}'.strip()
 
 
+def task_command_path(execute: object) -> Path:
+    """Resolve the Command a registered task reports to a real path.
+
+    Task Scheduler may return the command quoted and may carry environment strings, so
+    every comparison and every open of that path goes through this one function.
+    """
+    text = str(execute or "").strip()
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    return Path(os.path.realpath(os.path.expandvars(text)))
+
+
 def task_launcher() -> tuple[Path, str]:
     """Return (executable, arguments) registered as the scheduled task action."""
     executable, prefix = launcher_command(quiet=True)
