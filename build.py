@@ -4,8 +4,10 @@
 Steps: install the pinned build tools (unless --no-install), run the unit tests,
 regenerate the icon, run PyInstaller on ClaudeRestart.spec, smoke-test both
 executables, then zip the release layout into dist/. Windows, Python 3.10+.
-read_version() is the single place the version is read from claude_restart.py;
-ClaudeRestart.spec imports it from here.
+read_version() is the single place the version is read (clauderestart/__init__.py);
+ClaudeRestart.spec imports it from here. The payload (executables and release files)
+is defined once in clauderestart/payload.py and imported here, by the spec, and by
+the application itself, so adding a file cannot create two diverging manifests.
 
     py -3 build.py
     py -3 build.py --no-install --skip-tests
@@ -26,23 +28,21 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from clauderestart import payload  # noqa: E402  (pure Python, safe to import on any platform)
+
 DIST = ROOT / "dist"
-SOURCE = ROOT / "claude_restart.py"
-EXECUTABLES = ("ClaudeRestart.exe", "ClaudeRestart-quiet.exe")
-RELEASE_FILES = (
-    "ClaudeRestart-launch.cmd",
-    "Install Automatic Recovery.cmd",
-    "Remove Automatic Recovery.cmd",
-    "Start Claude Safely.cmd",
-    "README.md",
-    "docs/windows-event-automation.md",
-)
+SOURCE = ROOT / "clauderestart" / "__init__.py"
+EXECUTABLES = payload.EXECUTABLES
+RELEASE_FILES = payload.RELEASE_FILES
 
 
 def read_version() -> str:
     match = re.search(r'^__version__\s*=\s*"([^"]+)"', SOURCE.read_text(encoding="utf-8"), re.M)
     if not match:
-        sys.exit("__version__ not found in claude_restart.py")
+        sys.exit("__version__ not found in clauderestart/__init__.py")
     return match.group(1)
 
 
