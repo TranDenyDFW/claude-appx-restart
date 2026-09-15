@@ -136,6 +136,13 @@ def run(args: argparse.Namespace, reporter: Reporter) -> int:
     problem = trigger_identity_problem(package)
     if problem:
         reporter.emit("WARN", problem)
+    if package.application_id is None and not args.scan:
+        # Fail closed before anything is terminated: without a confirmed identity the
+        # tool could kill the stale Job and then be unable to start Claude again.
+        raise SafetyStop(
+            f"Claude application id unknown ({package.application_id_error}); "
+            "no Job was terminated and Claude was not launched."
+        )
     if args.event_triggered:
         found = events.auto_recovery_events(package, minutes=10)
         if not found:

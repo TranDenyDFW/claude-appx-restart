@@ -472,7 +472,13 @@ def visible_claude_windows(package: PackageInfo) -> list[dict[str, object]]:
 
 
 def launch_and_verify(package: PackageInfo, reporter: Reporter, wait_seconds: int) -> bool:
-    aumid = f"{package.package_family_name}!{package.application_id}"
+    aumid = package.aumid
+    if aumid is None:
+        # Defensive: cli.run refuses earlier, so reaching this is a programming error.
+        raise RecoveryError(
+            f"Cannot launch Claude: the application id could not be established "
+            f"({package.application_id_error})."
+        )
     started_at = datetime.now(timezone.utc)
     reporter.emit("LAUNCH", f"Starting shell:AppsFolder\\{aumid}")
     # Explorer hands the activation to the running (unelevated) shell and exits, so the
