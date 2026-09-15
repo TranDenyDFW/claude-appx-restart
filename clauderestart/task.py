@@ -9,10 +9,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import Protocol
 import xml.etree.ElementTree as ET
 
 from . import __version__, events, payload, shell, winapi
 from .errors import RecoveryError
+from .package import AUTO_RECOVERY_APPLICATION
 from .reporting import app_entry
 
 
@@ -171,6 +173,87 @@ def build_task_xml(executable: Path, arguments: str, user_sid: str, working_dire
     child(exec_node, "Arguments", arguments)
     child(exec_node, "WorkingDirectory", str(working_directory))
     return '<?xml version="1.0" encoding="UTF-16"?>\n' + ET.tostring(task, encoding="unicode")
+
+
+def export_task_xml() -> str:
+    """Return the current task definition, for restoring it if an upgrade fails.
+
+    Read through PowerShell rather than schtasks: the output crosses the process
+    boundary as text in a known encoding, so a user name outside the console code page
+    survives the round trip intact. Absence is decided by automation_task_status, never
+    by this function, so a failed export can never be mistaken for "there was no task".
+    """
+    name = shell.ps_single_quote(AUTO_RECOVERY_TASK_NAME)
+    script = f"Export-ScheduledTask -TaskName {name} -TaskPath '\\' -ErrorAction Stop"
+    try:
+        exported = shell.run_powershell(script)
+    except RecoveryError as exc:
+        raise RecoveryError(f"Could not capture the existing task for rollback: {exc}") from exc
+    if not exported.strip():
+        raise RecoveryError("Could not capture the existing task for rollback: the export was empty.")
+    return exported
+
+
+def verify_registered_task(status: dict[str, object], arguments: str, executable: Path) -> list[str]:
+    """Return every way the registered task differs from what was asked for."""
+    problems: list[str] = []
+    if status.get("Installed") is not True:
+        return ["the task is not registered"]
+    checks = (
+        ("MultipleInstances", status.get("MultipleInstances"), ("IgnoreNew",)),
+        ("LogonType", status.get("LogonType"), ("Interactive", "InteractiveToken")),
+        ("RunLevel", status.get("RunLevel"), ("Highest", "HighestAvailable")),
+        ("ExecutionTimeLimit", status.get("ExecutionTimeLimit"), ("PT5M",)),
+    )
+    for label, observed, allowed in checks:
+        if observed not in allowed:
+            problems.append(f"{label} is {observed!r}, expected one of {allowed}")
+    if status.get("DisallowStartIfOnBatteries") is not False:
+        problems.append("the task would not start on battery power")
+    if status.get("StopIfGoingOnBatteries") is not False:
+        problems.append("the task would stop when the machine is unplugged")
+    subscription = str(status.get("Subscription") or "")
+    if not subscription:
+        problems.append("the task has no event subscription")
+    else:
+        if AUTO_RECOVERY_APPLICATION not in subscription:
+            problems.append("the event subscription does not name the Claude application")
+        if events.SHARE_VIOLATION_DECIMAL not in subscription:
+            problems.append("the event subscription does not name the sharing violation error")
+    if str(status.get("Arguments")) != arguments:
+        problems.append(f"the arguments are {status.get('Arguments')!r}, expected {arguments!r}")
+    registered = task_command_path(status.get("Execute"))
+    if winapi.canonical(registered) != winapi.canonical(executable):
+        problems.append(f"the task runs {registered}, expected {executable}")
+    return problems
+
+
+class TaskBackend(Protocol):
+    """The scheduled-task operations an install performs, so tests can record them."""
+
+    def automation_task_status(self) -> dict[str, object]: ...
+
+    def export_task_xml(self) -> str: ...
+
+    def register_task_xml(self, xml_text: str) -> None: ...
+
+    def delete_task(self): ...
+
+
+class WindowsTaskBackend:
+    """The real Task Scheduler behind the interface above."""
+
+    def automation_task_status(self) -> dict[str, object]:
+        return automation_task_status()
+
+    def export_task_xml(self) -> str:
+        return export_task_xml()
+
+    def register_task_xml(self, xml_text: str) -> None:
+        register_task_xml(xml_text)
+
+    def delete_task(self):
+        return delete_task()
 
 
 def register_task_xml(xml_text: str) -> None:

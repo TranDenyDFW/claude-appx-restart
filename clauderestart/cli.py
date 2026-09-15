@@ -24,52 +24,25 @@ EXIT_INTERNAL_ERROR = 3
 EXIT_STALE_FOUND = 10
 
 
-def install_auto_recovery(reporter: Reporter) -> None:
+def install_auto_recovery(reporter: Reporter, args: argparse.Namespace | None = None) -> None:
+    """Install automatic recovery: a new immutable version, then the task pointing at it."""
+    allow_downgrade = bool(getattr(args, "allow_downgrade", False))
     package = get_claude_package()
     problem = trigger_identity_problem(package)
     if problem:
         raise SafetyStop(problem + " Automation was not installed.")
-    if winapi.is_frozen():
-        location = install.copy_to_install_dir(reporter, install.install_dir())
-        executable, arguments = location / payload.QUIET_EXE_NAME, task.TASK_ARGUMENTS
-    else:
-        reporter.emit(
-            "WARN",
-            "Running from source, so the task runs this interpreter and script from where they are now. "
-            "Install with the release executables to run automatic recovery from Program Files, where only "
-            "administrators can change the files it runs.",
-        )
-        location = app_location()
-        executable, arguments = task.task_launcher()
-    task.register_task_xml(task.build_task_xml(executable, arguments, package.user_sid, location))
-
-    status = task.automation_task_status()
-    valid = (
-        status.get("Installed") is True
-        and status.get("MultipleInstances") == "IgnoreNew"
-        and status.get("LogonType") in ("Interactive", "InteractiveToken")
-        and status.get("RunLevel") in ("Highest", "HighestAvailable")
-        and status.get("DisallowStartIfOnBatteries") is False
-        and status.get("StopIfGoingOnBatteries") is False
-        and bool(status.get("Subscription"))
-        and AUTO_RECOVERY_APPLICATION in str(status.get("Subscription"))
-        and events.SHARE_VIOLATION_DECIMAL in str(status.get("Subscription"))
-        and os.path.normcase(str(status.get("Execute")).strip('"')) == os.path.normcase(str(executable))
-        and str(status.get("Arguments")) == arguments
-    )
-    if not valid:
-        task.delete_task()
-        raise SafetyStop("The registered task did not preserve the reviewed trigger/action settings; it was removed.")
-    reporter.emit(
-        "INSTALLED",
-        f"Task '{task.AUTO_RECOVERY_TASK_NAME}' watches Event 208 for {AUTO_RECOVERY_APPLICATION} / "
-        f"{events.SHARE_VIOLATION_HEX}, runs only while this user is signed in, and also runs on battery power.",
-    )
-    reporter.emit("ACTION", task.build_task_action(executable, arguments))
-    reporter.emit("PACKAGE", f"Current package verified: {package.package_full_name}")
+    if not winapi.is_frozen():
+        install.install_from_source(reporter, package)
+        return
+    authenticated = twin.authenticate_twin(Path(sys.executable).resolve())
+    try:
+        install.install_versioned(reporter, authenticated, package, allow_downgrade=allow_downgrade)
+    finally:
+        authenticated.close()
 
 
-def remove_auto_recovery(reporter: Reporter) -> None:
+def remove_auto_recovery(reporter: Reporter, args: argparse.Namespace | None = None) -> None:
+    force = bool(getattr(args, "force_cleanup", False))
     status = task.automation_task_status()
     if status.get("Installed"):
         completed = task.delete_task()
@@ -80,7 +53,7 @@ def remove_auto_recovery(reporter: Reporter) -> None:
     else:
         reporter.emit("NOT INSTALLED", f"Task '{task.AUTO_RECOVERY_TASK_NAME}' is already absent.")
     if winapi.is_frozen():
-        install.remove_install_dir(reporter, install.install_dir())
+        install.remove_installation(reporter, force=force)
 
 
 def show_auto_recovery_status(reporter: Reporter) -> int:
@@ -104,6 +77,16 @@ def show_auto_recovery_status(reporter: Reporter) -> int:
     if status.get("Description"):
         reporter.emit("DESCRIPTION", str(status.get("Description")))
     reporter.emit("LAST RUN", f"{status.get('LastRunTime') or 'never'}; result={status.get('LastTaskResult')}")
+    registered = task.task_command_path(status.get("Execute"))
+    try:
+        root = install.install_dir()
+        under = "under the protected folder" if os.path.normcase(str(registered)).startswith(
+            os.path.normcase(str(root)) + os.sep
+        ) else "not under the protected folder"
+        reporter.emit("EXECUTABLE", f"{registered} ({under})")
+        install.installed_state(reporter, root)
+    except (RecoveryError, OSError) as exc:
+        reporter.emit("EXECUTABLE", f"{registered} (the protected folder could not be read: {exc})")
     return EXIT_OK
 
 
@@ -266,6 +249,16 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--print-embedded-twin", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--yes", action="store_true", help="skip the typed REPAIR confirmation")
     parser.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="install this version even when a newer one is already registered",
+    )
+    parser.add_argument(
+        "--force-cleanup",
+        action="store_true",
+        help="when removing, also delete installed files that were changed after installation",
+    )
+    parser.add_argument(
         "--wait",
         type=int,
         default=20,
@@ -357,10 +350,10 @@ def main() -> int:
         elif not winapi.is_admin():
             raise RecoveryError("Administrator access is required to inspect Appinfo's Job handles.")
         elif args.install_automation:
-            install_auto_recovery(reporter)
+            install_auto_recovery(reporter, args)
             exit_code = EXIT_OK
         elif args.remove_automation:
-            remove_auto_recovery(reporter)
+            remove_auto_recovery(reporter, args)
             exit_code = EXIT_OK
         else:
             enable_debug_privilege()

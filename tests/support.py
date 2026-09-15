@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 from unittest import mock
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from clauderestart import winapi  # noqa: E402
+from clauderestart.errors import RecoveryError  # noqa: E402
 from clauderestart.security import AclReport  # noqa: E402
 
 
@@ -84,29 +86,85 @@ class FakeFileSecurity:
 
 
 class FakeTaskBackend:
-    """Records every scheduled-task call so a test can prove none was made."""
+    """A stand-in Task Scheduler that answers from the definition it was given.
 
-    def __init__(self, *, status: dict[str, object] | None = None, xml: str | None = None) -> None:
-        self.status = status or {"Installed": False}
-        self.xml = xml
+    Registering makes the reported status reflect the XML that was registered, so the
+    verification the installer performs is real work rather than a rubber stamp; a test
+    forces a mismatch by passing status_override.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: dict[str, object] | None = None,
+        xml: str | None = None,
+        status_override: dict[str, object] | None = None,
+        export_error: Exception | None = None,
+        register_error: Exception | None = None,
+    ) -> None:
+        self._status = dict(status or {"Installed": False})
+        self._xml = xml
+        self.status_override = status_override
+        self.export_error = export_error
+        self.register_error = register_error
         self.registered: list[str] = []
         self.deleted = 0
         self.exported = 0
-        self.register_error: Exception | None = None
+
+    @property
+    def calls(self) -> int:
+        return len(self.registered) + self.deleted
 
     def automation_task_status(self) -> dict[str, object]:
-        return dict(self.status)
+        return dict(self._status)
 
-    def export_task_xml(self) -> str | None:
+    def export_task_xml(self) -> str:
+        if self.export_error is not None:
+            raise self.export_error
         self.exported += 1
-        return self.xml
+        if not self._xml:
+            raise RecoveryError("Could not capture the existing task for rollback: the export was empty.")
+        return self._xml
 
     def register_task_xml(self, xml_text: str) -> None:
         self.registered.append(xml_text)
         if self.register_error is not None:
             error, self.register_error = self.register_error, None
             raise error
+        self._xml = xml_text
+        self._status = self.status_from_xml(xml_text)
+        if self.status_override:
+            self._status.update(self.status_override)
 
     def delete_task(self):
         self.deleted += 1
+        self._status = {"Installed": False}
         return subprocess.CompletedProcess(["schtasks.exe"], 0, stdout="", stderr="")
+
+    @staticmethod
+    def status_from_xml(xml_text: str) -> dict[str, object]:
+        """Report what the registered definition actually says."""
+        body = xml_text.split("?>", 1)[-1] if xml_text.lstrip().startswith("<?xml") else xml_text
+        root = ET.fromstring(body)
+        namespace = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+
+        def text(path: str, default: str = "") -> str:
+            return root.findtext(path, default=default, namespaces=namespace)
+
+        return {
+            "Installed": True,
+            "State": "Ready",
+            "MultipleInstances": text("t:Settings/t:MultipleInstancesPolicy"),
+            "LogonType": text("t:Principals/t:Principal/t:LogonType"),
+            "RunLevel": text("t:Principals/t:Principal/t:RunLevel"),
+            "Subscription": text("t:Triggers/t:EventTrigger/t:Subscription"),
+            "Execute": text("t:Actions/t:Exec/t:Command"),
+            "Arguments": text("t:Actions/t:Exec/t:Arguments"),
+            "DisallowStartIfOnBatteries": text("t:Settings/t:DisallowStartIfOnBatteries") == "true",
+            "StopIfGoingOnBatteries": text("t:Settings/t:StopIfGoingOnBatteries") == "true",
+            "ExecutionTimeLimit": text("t:Settings/t:ExecutionTimeLimit"),
+            "Priority": int(text("t:Settings/t:Priority", "5") or 5),
+            "Description": "",
+            "LastRunTime": "",
+            "LastTaskResult": 0,
+        }

@@ -64,6 +64,11 @@ def lock_console() -> winapi.LockedFile | None:
     return _console_lock
 
 
+def console_lock() -> winapi.LockedFile | None:
+    """The handle held on this executable, so a copy reads the bytes that are running."""
+    return _console_lock
+
+
 def load_embedded_twin() -> EmbeddedTwin | None:
     """Return the record built into this executable, or None when there is none."""
     global _embedded, _embedded_loaded
