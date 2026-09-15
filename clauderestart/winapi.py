@@ -26,6 +26,10 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 DUPLICATE_SAME_ACCESS = 0x00000002
 JOB_OBJECT_QUERY = 0x0004
 JOB_OBJECT_TERMINATE = 0x0008
+JOB_OBJECT_SET_ATTRIBUTES = 0x0002
+JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+JOB_CLASS_BASIC_ACCOUNTING = 1
+JOB_CLASS_EXTENDED_LIMIT = 9
 TOKEN_QUERY = 0x0008
 TOKEN_ADJUST_PRIVILEGES = 0x0020
 SE_PRIVILEGE_ENABLED = 0x00000002
@@ -246,6 +250,13 @@ def configure() -> None:
     kernel32.QueryInformationJobObject.restype = wintypes.BOOL
     kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
     kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.INT,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
     kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
     kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
     kernel32.QueryFullProcessImageNameW.argtypes = [
@@ -458,6 +469,55 @@ class FILE_ATTRIBUTE_TAG_INFORMATION(ctypes.Structure):
     _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
 
 
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_longlong),
+        ("TotalKernelTime", ctypes.c_longlong),
+        ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+        ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+    ]
+
+
 class ACL_SIZE_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("AceCount", wintypes.DWORD),
@@ -617,6 +677,28 @@ def apply_security_from_sddl(handle: int, sddl: str, *, owner: bool = True) -> N
             raise RecoveryError(f"SetSecurityInfo failed: {ctypes.WinError(code)}")
     finally:
         kernel32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+
+def duplicate_own_handle(handle: int, access: int) -> int:
+    """Duplicate one of this process's own handles, asking for wider access.
+
+    The access check runs against the object's security descriptor, so this fails
+    rather than silently returning a weaker handle.
+    """
+    duplicate = wintypes.HANDLE()
+    ctypes.set_last_error(0)
+    current = kernel32.GetCurrentProcess()
+    if not kernel32.DuplicateHandle(
+        current,
+        wintypes.HANDLE(handle),
+        current,
+        ctypes.byref(duplicate),
+        access,
+        False,
+        0,
+    ):
+        raise winerror(f"DuplicateHandle(access 0x{access:X})")
+    return int(duplicate.value or 0)
 
 
 def enable_privilege(name: str) -> None:

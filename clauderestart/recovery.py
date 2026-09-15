@@ -18,7 +18,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from . import events, shell, winapi
 from .errors import RecoveryError, SafetyStop
@@ -359,67 +359,304 @@ def process_details(pids: Iterable[int]) -> list[ProcessInfo]:
     ]
 
 
-def _partition_members(
-    details: Iterable[ProcessInfo], current_session: int | None, still_in_job: Iterable[int]
-) -> tuple[list[int], list[int]]:
-    """Split Job members into (exited, unverified) PIDs.
+class MembershipChanged(RuntimeError):
+    """Members left the Job during validation, so the attempt must start again."""
 
-    A member counts as exited only when its session and process could not be opened
-    AND the kernel no longer lists it in the Job (a fresh JobObjectBasicProcessIdList
-    snapshot). A member the kernel still lists but that cannot be verified in this
-    session is unverified, which stops the repair: the Job is never terminated on an
-    inference.
+    def __init__(self, exited: Iterable[int]) -> None:
+        self.exited = sorted(exited)
+        super().__init__(f"member(s) exited during validation: {self.exited}")
+
+
+class JobInspector(Protocol):
+    """Everything the repair does to a Job, behind one interface.
+
+    Real termination and real kernel limits sit behind this, so the race fixtures and
+    the failure-injection tests drive the same driver without terminating anything.
     """
-    remaining = set(still_in_job)
-    exited: list[int] = []
-    unverified: list[int] = []
-    for info in details:
-        opaque = info.session_id is None and info.name == "<exited or inaccessible>"
-        if opaque and info.pid not in remaining:
-            exited.append(info.pid)
-        elif current_session is None or info.session_id is None or info.session_id != current_session:
-            unverified.append(info.pid)
-    return exited, unverified
+
+    def pids(self, job: JobRecord) -> list[int]: ...
+
+    def process_info(self, pid: int) -> ProcessInfo: ...
+
+    def current_session(self) -> int | None: ...
+
+    def duplicate_for_freeze(self, job: JobRecord) -> int: ...
+
+    def query_limits(self, handle: int) -> bytes: ...
+
+    def set_active_process_limit(self, handle: int, count: int) -> None: ...
+
+    def restore_limits(self, handle: int, saved: bytes) -> None: ...
+
+    def accounting(self, handle: int) -> int: ...
+
+    def terminate(self, job: JobRecord) -> None: ...
+
+    def close(self, handle: int) -> None: ...
 
 
-def validate_live_members(job: JobRecord, appinfo_pid: int, reporter: Reporter | None = None) -> list[ProcessInfo]:
-    live_pids = query_job_pids(job.handle)
-    prohibited = {0, 4, os.getpid(), appinfo_pid}
-    collision = prohibited.intersection(live_pids)
-    if collision:
-        raise SafetyStop(
-            f"Refusing to terminate {job.name}: protected/current PID(s) present: {sorted(collision)}."
+class WindowsJobInspector:
+    """The real kernel behind the interface above."""
+
+    def pids(self, job: JobRecord) -> list[int]:
+        return query_job_pids(job.handle)
+
+    def process_info(self, pid: int) -> ProcessInfo:
+        return _native_process_info(pid)
+
+    def current_session(self) -> int | None:
+        return _process_session_id(os.getpid())
+
+    def duplicate_for_freeze(self, job: JobRecord) -> int:
+        return winapi.duplicate_own_handle(
+            job.handle,
+            winapi.JOB_OBJECT_QUERY | winapi.JOB_OBJECT_TERMINATE | winapi.JOB_OBJECT_SET_ATTRIBUTES,
         )
-    current_session = _process_session_id(os.getpid())
-    details = process_details(live_pids)
-    exited, unverified = _partition_members(details, current_session, query_job_pids(job.handle))
-    if unverified:
-        raise SafetyStop(
-            f"Refusing to terminate {job.name}: PID(s) could not be verified in this user session: {unverified}."
-        )
-    if exited and reporter is not None:
-        reporter.emit("NOTE", f"{len(exited)} member(s) of {job.name} exited before validation: {exited}.")
-    job.pids = [pid for pid in live_pids if pid not in exited]
-    return details
+
+    def query_limits(self, handle: int) -> bytes:
+        limits = winapi.JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        returned = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        if not winapi.kernel32.QueryInformationJobObject(
+            wintypes.HANDLE(handle),
+            winapi.JOB_CLASS_EXTENDED_LIMIT,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+            ctypes.byref(returned),
+        ):
+            raise winapi.winerror("QueryInformationJobObject(extended limits)")
+        return bytes(memoryview(limits).cast("B"))
+
+    def set_active_process_limit(self, handle: int, count: int) -> None:
+        limits = winapi.JOBOBJECT_EXTENDED_LIMIT_INFORMATION.from_buffer_copy(self.query_limits(handle))
+        limits.BasicLimitInformation.LimitFlags |= winapi.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        limits.BasicLimitInformation.ActiveProcessLimit = count
+        ctypes.set_last_error(0)
+        if not winapi.kernel32.SetInformationJobObject(
+            wintypes.HANDLE(handle), winapi.JOB_CLASS_EXTENDED_LIMIT, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            raise winapi.winerror("SetInformationJobObject(active process limit)")
+
+    def restore_limits(self, handle: int, saved: bytes) -> None:
+        limits = winapi.JOBOBJECT_EXTENDED_LIMIT_INFORMATION.from_buffer_copy(saved)
+        ctypes.set_last_error(0)
+        if not winapi.kernel32.SetInformationJobObject(
+            wintypes.HANDLE(handle), winapi.JOB_CLASS_EXTENDED_LIMIT, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            raise winapi.winerror("SetInformationJobObject(restore limits)")
+
+    def accounting(self, handle: int) -> int:
+        counters = winapi.JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        returned = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        if not winapi.kernel32.QueryInformationJobObject(
+            wintypes.HANDLE(handle),
+            winapi.JOB_CLASS_BASIC_ACCOUNTING,
+            ctypes.byref(counters),
+            ctypes.sizeof(counters),
+            ctypes.byref(returned),
+        ):
+            raise winapi.winerror("QueryInformationJobObject(accounting)")
+        return int(counters.ActiveProcesses)
+
+    def terminate(self, job: JobRecord) -> None:
+        ctypes.set_last_error(0)
+        if not winapi.kernel32.TerminateJobObject(wintypes.HANDLE(job.handle), 0xC0DE):
+            raise winapi.winerror(f"TerminateJobObject({job.name})")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if not query_job_pids(job.handle):
+                return
+            time.sleep(0.2)
+        survivors = query_job_pids(job.handle)
+        raise RecoveryError(f"The stale Job still reports member PID(s) after termination: {survivors}.")
+
+    def close(self, handle: int) -> None:
+        winapi.close_handle(handle)
 
 
-def terminate_exact_job(job: JobRecord) -> None:
+def _require_terminate_access(job: JobRecord) -> None:
     required = winapi.JOB_OBJECT_QUERY | winapi.JOB_OBJECT_TERMINATE
     if job.granted_access & required != required:
         raise SafetyStop(
             f"Appinfo Job handle 0x{job.source_handle:X} lacks reviewed query/terminate access "
             f"(granted 0x{job.granted_access:X})."
         )
-    ctypes.set_last_error(0)
-    if not winapi.kernel32.TerminateJobObject(wintypes.HANDLE(job.handle), 0xC0DE):
-        raise winapi.winerror(f"TerminateJobObject({job.name})")
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline:
-        if not query_job_pids(job.handle):
-            return
-        time.sleep(0.2)
-    survivors = query_job_pids(job.handle)
-    raise RecoveryError(f"The stale Job still reports member PID(s) after termination: {survivors}.")
+
+
+def validate_once(job: JobRecord, appinfo_pid: int, inspector: JobInspector) -> dict[int, int]:
+    """Check every member of one Job snapshot, or refuse.
+
+    Two snapshots bracket the per-process checks. A PID that appears between them means
+    the Job grew while it was being validated, which no amount of retrying makes safe:
+    the new member was never checked and would be terminated anyway. Members that leave
+    are benign, and raise MembershipChanged so the caller can try again on the smaller
+    set. Returns the validated PIDs with the creation time each was verified at, so a
+    reused PID cannot pass a later check.
+    """
+    snapshot = set(inspector.pids(job))
+    prohibited = {0, 4, os.getpid(), appinfo_pid}
+    collision = prohibited.intersection(snapshot)
+    if collision:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: protected/current PID(s) present: {sorted(collision)}."
+        )
+    session = inspector.current_session()
+    details = {pid: inspector.process_info(pid) for pid in sorted(snapshot)}
+    recheck = set(inspector.pids(job))
+    added = recheck - snapshot
+    if added:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: it gained member(s) {sorted(added)} while they were being "
+            "checked, so they were never verified."
+        )
+    unverified = []
+    for pid in sorted(recheck):
+        info = details.get(pid)
+        if info is None or session is None or info.session_id != session or info.creation_time is None:
+            unverified.append(pid)
+    if unverified:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: PID(s) could not be verified in this user session: {unverified}."
+        )
+    if recheck != snapshot:
+        raise MembershipChanged(snapshot - recheck)
+    return {pid: int(details[pid].creation_time) for pid in sorted(recheck)}
+
+
+def final_check(job: JobRecord, validated: dict[int, int], inspector: JobInspector) -> str:
+    """Re-read membership immediately before termination. Returns DONE or RETRY."""
+    final = set(inspector.pids(job))
+    added = final - set(validated)
+    if added:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: member(s) {sorted(added)} appeared after validation."
+        )
+    details = {pid: inspector.process_info(pid) for pid in sorted(final)}
+    recheck = set(inspector.pids(job))
+    added = recheck - set(validated)
+    if added:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: member(s) {sorted(added)} appeared after validation."
+        )
+    for pid in sorted(recheck):
+        info = details.get(pid)
+        if info is None or info.creation_time is None:
+            raise SafetyStop(
+                f"Refusing to terminate {job.name}: PID {pid} could not be verified immediately before "
+                "termination."
+            )
+        if int(info.creation_time) != validated[pid]:
+            raise SafetyStop(
+                f"Refusing to terminate {job.name}: PID {pid} is no longer the process that was validated "
+                "(the number was reused)."
+            )
+    return "DONE" if recheck == set(validated) else "RETRY"
+
+
+def repair_stale_job(
+    job: JobRecord,
+    appinfo_pid: int,
+    reporter: Reporter,
+    inspector: JobInspector | None = None,
+    attempts: int = 3,
+) -> int:
+    """Validate, freeze, re-check, then terminate exactly one stale Job.
+
+    One budget covers the whole repair: a member leaving during validation and a member
+    leaving after it both consume one attempt. Membership is frozen with an
+    active-process limit before the final check, so the Job cannot grow between that
+    check and the termination; the limit is always restored and the extra handle always
+    closed, whatever happens.
+    """
+    inspector = inspector or WindowsJobInspector()
+    _require_terminate_access(job)
+    try:
+        freeze_handle = inspector.duplicate_for_freeze(job)
+    except (RecoveryError, OSError) as exc:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: its membership cannot be frozen ({exc}), so a process could "
+            "join between the last check and the termination."
+        ) from exc
+
+    saved = inspector.query_limits(freeze_handle)
+    applied = False
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                validated = validate_once(job, appinfo_pid, inspector)
+            except MembershipChanged as change:
+                reporter.emit(
+                    "NOTE", f"{len(change.exited)} member(s) of {job.name} exited during validation: {change.exited}."
+                )
+                continue
+            job.pids = sorted(validated)
+            reporter.emit(
+                "REVALIDATED",
+                f"{job.name} has {len(validated)} live member(s), all in this user session.",
+            )
+            try:
+                inspector.set_active_process_limit(freeze_handle, len(validated))
+            except (RecoveryError, OSError) as exc:
+                raise SafetyStop(
+                    f"Refusing to terminate {job.name}: its membership could not be frozen ({exc}), so a "
+                    "process could join between the last check and the termination."
+                ) from exc
+            applied = True
+            reporter.emit(
+                "FREEZE",
+                f"{job.name} is limited to its {len(validated)} validated member(s), so it cannot grow.",
+            )
+            if final_check(job, validated, inspector) == "RETRY":
+                reporter.emit("NOTE", f"A member of {job.name} exited before termination; checking again.")
+                continue
+            inspector.terminate(job)
+            reporter.emit("CLOSED", f"Terminated the exact stale Job and its {len(validated)} member(s).")
+            return len(validated)
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: its membership kept changing over {attempts} attempts."
+        )
+    finally:
+        problems = []
+        if applied:
+            try:
+                inspector.restore_limits(freeze_handle, saved)
+            except (RecoveryError, OSError) as exc:
+                problems.append(str(exc))
+        try:
+            inspector.close(freeze_handle)
+        except (RecoveryError, OSError) as exc:
+            problems.append(str(exc))
+        if problems:
+            # Reported, never raised: this must not mask the outcome above.
+            reporter.emit("ERROR", f"Could not tidy up after {job.name}: " + "; ".join(problems))
+
+
+def probe_freeze(job: JobRecord, inspector: JobInspector | None = None) -> dict[str, object]:
+    """Read-only: can this Job's membership be frozen, and what are its limits now?
+
+    A stale Job exists only during an incident, so --scan runs this on every Claude Job,
+    current ones included, to answer that question before an incident happens.
+    """
+    inspector = inspector or WindowsJobInspector()
+    try:
+        handle = inspector.duplicate_for_freeze(job)
+    except (RecoveryError, OSError) as exc:
+        return {"available": False, "error": str(exc), "active": None, "limit": None}
+    try:
+        limits = winapi.JOBOBJECT_EXTENDED_LIMIT_INFORMATION.from_buffer_copy(inspector.query_limits(handle))
+        return {
+            "available": True,
+            "error": "",
+            "active": inspector.accounting(handle),
+            "limit": int(limits.BasicLimitInformation.ActiveProcessLimit)
+            if limits.BasicLimitInformation.LimitFlags & winapi.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            else None,
+        }
+    except (RecoveryError, OSError) as exc:
+        return {"available": False, "error": str(exc), "active": None, "limit": None}
+    finally:
+        inspector.close(handle)
 
 
 def close_job_records(jobs: Iterable[JobRecord]) -> None:
@@ -606,10 +843,84 @@ def historical_self_check(reporter: Reporter) -> bool:
         except SafetyStop:
             safety_checks += 1
 
+    race_passed, race_total = _race_self_check(reporter)
+
     reporter.emit(
         "SELF-CHECK",
         f"Production classifier selected only the older Job in {passed}/{len(fixtures)} incidents; "
         f"all {safety_checks}/3 current/newer/wrong-user guards passed; member counts ranged from "
-        f"{min(item[2] for item in fixtures)} to {max(item[2] for item in fixtures)}.",
+        f"{min(item[2] for item in fixtures)} to {max(item[2] for item in fixtures)}; "
+        f"race guards {race_passed}/{race_total}.",
     )
-    return passed == len(fixtures) and safety_checks == 3
+    return passed == len(fixtures) and safety_checks == 3 and race_passed == race_total
+
+
+def _race_self_check(reporter: Reporter) -> tuple[int, int]:
+    """Run the membership-race fixtures through the real repair driver.
+
+    These use the same repair_stale_job that runs during an incident, so a change that
+    weakened the checks would fail here, in every build and on every machine.
+    """
+    from .fakes import FakeJobInspector  # imported here so the package has no import cycle
+
+    quiet = Reporter()
+    quiet.emit = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+    job = lambda: JobRecord(  # noqa: E731 - a fresh record per fixture
+        9,
+        9,
+        0x1234,
+        winapi.JOB_OBJECT_QUERY | winapi.JOB_OBJECT_TERMINATE,
+        r"\Container_Claude_1.0.0.0_x64__pzs8sxrjxfjjc-S-1-5-21-1-2-3-1001",
+        [101, 102],
+    )
+    passed = 0
+    total = 5
+
+    # 1. A PID appears between the two validation snapshots: never validated, so stop.
+    grew = FakeJobInspector([[101, 102], [101, 102, 103]])
+    try:
+        repair_stale_job(job(), 4242, quiet, grew)
+    except SafetyStop:
+        passed += int(grew.terminate_calls == 0)
+
+    # 2. A validated PID is replaced by the same number with a different start time.
+    reused = FakeJobInspector(
+        [[101, 102], [101, 102], [101, 102], [101, 102]],
+        info={
+            # Validation sees one start time; the check before termination sees another,
+            # which is what a reused process number looks like.
+            102: [
+                ProcessInfo(102, "claude.exe", "", "", 1, 5),
+                ProcessInfo(102, "claude.exe", "", "", 1, 99),
+            ]
+        },
+    )
+    try:
+        repair_stale_job(job(), 4242, quiet, reused)
+    except SafetyStop:
+        passed += int(reused.terminate_calls == 0)
+
+    # 3. A member exits during validation: retry, then terminate the remaining set.
+    shrank = FakeJobInspector([[101, 102], [101], [101], [101], [101], [101]])
+    try:
+        closed = repair_stale_job(job(), 4242, quiet, shrank)
+        passed += int(closed == 1 and shrank.terminate_calls == 1)
+    except SafetyStop:
+        pass
+
+    # 4. A PID appears after validation, before the final snapshot.
+    late = FakeJobInspector([[101, 102], [101, 102], [101, 102, 103]])
+    try:
+        repair_stale_job(job(), 4242, quiet, late)
+    except SafetyStop:
+        passed += int(late.terminate_calls == 0)
+
+    # 5. A member exits after validation: retry, and the freeze is restored each time.
+    exited_late = FakeJobInspector([[101, 102], [101, 102], [101], [101], [101], [101], [101], [101]])
+    try:
+        closed = repair_stale_job(job(), 4242, quiet, exited_late)
+        passed += int(closed == 1 and exited_late.terminate_calls == 1 and bool(exited_late.restore_calls))
+    except SafetyStop:
+        pass
+
+    return passed, total

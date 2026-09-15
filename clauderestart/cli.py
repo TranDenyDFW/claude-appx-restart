@@ -188,6 +188,16 @@ def run(args: argparse.Namespace, reporter: Reporter) -> int:
         if not stale:
             reporter.emit("SAFE", "No exact older Claude AppX Job is present.")
         if args.scan:
+            # A stale Job exists only during an incident, so the freeze is probed on
+            # every Claude Job here: that answers "would a repair work" beforehand.
+            for label, job in [("CURRENT", job) for job in current] + [("STALE", job) for job in stale]:
+                probe = recovery.probe_freeze(job)
+                state = "available" if probe["available"] else f"unavailable ({probe['error']})"
+                reporter.emit(
+                    "FREEZE",
+                    f"{label} {job.name}: membership freeze {state}; "
+                    f"active members {probe['active']}; current limit {probe['limit']}.",
+                )
             reporter.emit("DRY-RUN", "No processes were terminated and Claude was not launched.")
             return EXIT_STALE_FOUND if stale else EXIT_OK
         if args.event_triggered and not stale:
@@ -205,13 +215,9 @@ def run(args: argparse.Namespace, reporter: Reporter) -> int:
                 return EXIT_SAFETY_STOP
 
         for job in stale:
-            recovery.validate_live_members(job, appinfo_pid, reporter)
-            reporter.emit(
-                "REVALIDATED",
-                f"{job.name} has {len(job.pids)} live member(s), all in this user session.",
-            )
-            recovery.terminate_exact_job(job)
-            reporter.emit("CLOSED", f"Terminated the exact stale Job and its {len(job.pids)} member(s).")
+            # One driver owns validation, the membership freeze, the final re-check and
+            # the termination, and reports each step.
+            recovery.repair_stale_job(job, appinfo_pid, reporter)
     finally:
         recovery.close_job_records(jobs)
 

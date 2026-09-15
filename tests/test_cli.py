@@ -65,7 +65,7 @@ class UnknownIdentityRunTests(unittest.TestCase):
         reporter = reporting.Reporter()
         with mock.patch.object(cli, "get_claude_package", return_value=self.unknown()), mock.patch.object(
             cli.recovery, "get_appinfo_pid", return_value=0
-        ) as appinfo, mock.patch.object(cli.recovery, "terminate_exact_job") as terminate, mock.patch.object(
+        ) as appinfo, mock.patch.object(cli.recovery, "repair_stale_job") as terminate, mock.patch.object(
             cli.recovery, "launch_and_verify", return_value=True
         ) as launch, mock.patch.object(cli.events, "auto_recovery_events", return_value=[]) as events_query:
             calls = {

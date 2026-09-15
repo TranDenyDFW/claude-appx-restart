@@ -271,6 +271,8 @@ def smoke_test(dist: Path, expected_version: str, record: TwinRecord | None = No
     self_check = run([str(console_exe), "--self-check"], capture_output=True).stdout
     if "SELF-CHECK" not in self_check:
         sys.exit("Smoke test failed: the console self-check printed no result.")
+    if "race guards 5/5" not in self_check:
+        sys.exit(f"Smoke test failed: the console self-check did not pass every race guard: {self_check.strip()}")
     print(self_check.strip().splitlines()[0], flush=True)
     if record is not None:
         printed = run([str(console_exe), "--print-embedded-twin"], capture_output=True).stdout.strip()

@@ -33,6 +33,7 @@ class SmokeTestTests(unittest.TestCase):
         for name in build.EXECUTABLES:
             (self.dist / name).write_bytes(b"")
         self.calls: list[list[str]] = []
+        self.race_guards = "5/5"
         self.record = build.TwinRecord("ClaudeRestart-quiet.exe", "a" * 64, 7, "1.0.1")
 
     def fake_run(self, version_output: str = "ClaudeRestart 1.0.1", embedded: str | None = None):
@@ -44,7 +45,7 @@ class SmokeTestTests(unittest.TestCase):
             if command[-1] == "--version":
                 stdout = version_output + "\n"
             elif command[-1] == "--self-check":
-                stdout = "[SELF-CHECK] fixtures passed\n"
+                stdout = f"[SELF-CHECK] fixtures passed; race guards {self.race_guards}\n"
                 (self.dist / "last-run.log").write_text("[SELF-CHECK] console\n", encoding="utf-8")
             elif command[-1] == "--print-embedded-twin":
                 if embedded is None:
@@ -119,6 +120,12 @@ class SmokeTestTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as stop:
                 build.smoke_test(self.dist, "1.0.1")
         self.assertIn("did not write last-run.log", str(stop.exception))
+
+    def test_a_self_check_that_fails_a_race_guard_stops_the_build(self) -> None:
+        self.race_guards = "4/5"
+        with self.assertRaises(SystemExit) as stop:
+            self.smoke(record=self.record)
+        self.assertIn("race guard", str(stop.exception))
 
     def test_version_mismatch_stops_the_build(self) -> None:
         with self.assertRaises(SystemExit) as stop:
