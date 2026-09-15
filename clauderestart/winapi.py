@@ -40,6 +40,26 @@ ERROR_CANCELLED = 1223
 INFINITE = 0xFFFFFFFF
 FOLDERID_PROGRAM_FILES = "{905e63b6-c1bf-494e-b29c-65b732d3d21a}"
 
+# File handles. A file opened with only FILE_SHARE_READ cannot be written, renamed,
+# or deleted by anyone else while the handle is open, which is how bytes that were
+# hashed stay the bytes that are used.
+GENERIC_READ = 0x80000000
+READ_CONTROL = 0x00020000
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+OPEN_EXISTING = 3
+FILE_ATTRIBUTE_NORMAL = 0x00000080
+FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+FILE_NAME_NORMALIZED = 0x0
+VOLUME_NAME_DOS = 0x0
+FILE_ATTRIBUTE_TAG_INFO = 9
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+LONG_PATH_PREFIX = "\\\\?\\"
+LONG_PATH_UNC_PREFIX = "\\\\?\\UNC\\"
+
 
 if os.name == "nt":
     ole32 = ctypes.WinDLL("ole32")
@@ -48,6 +68,7 @@ if os.name == "nt":
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     user32 = ctypes.WinDLL("user32", use_last_error=True)
+    version = ctypes.WinDLL("version", use_last_error=True)
 
 
 class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
@@ -275,6 +296,43 @@ def configure() -> None:
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+
+    version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+    version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
+    version.GetFileVersionInfoW.restype = wintypes.BOOL
+    version.VerQueryValueW.argtypes = [
+        wintypes.LPVOID,
+        wintypes.LPCWSTR,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.UINT),
+    ]
+    version.VerQueryValueW.restype = wintypes.BOOL
+
 
 def is_frozen() -> bool:
     """Return True inside a PyInstaller executable (read at call time; tests patch this)."""
@@ -298,6 +356,179 @@ def close_handle(handle: int | None) -> None:
 
 def is_admin() -> bool:
     return bool(shell32.IsUserAnAdmin())
+
+
+class FILE_ATTRIBUTE_TAG_INFORMATION(ctypes.Structure):
+    _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+
+def canonical(path: object) -> str:
+    """Return a path in the one form every comparison in this package uses."""
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def strip_long_path_prefix(path: str) -> str:
+    if path.startswith(LONG_PATH_UNC_PREFIX):
+        return "\\\\" + path[len(LONG_PATH_UNC_PREFIX) :]
+    if path.startswith(LONG_PATH_PREFIX):
+        return path[len(LONG_PATH_PREFIX) :]
+    return path
+
+
+class LockedFile:
+    """An open handle that denies others write and delete access while it lives.
+
+    The handle has exactly one owner: the file object built from it. Reading, hashing,
+    copying, and identity checks all go through this one object, so the bytes that were
+    checked are the bytes that get used; the pathname is never reopened.
+    """
+
+    def __init__(self, path: object, *, directory: bool = False, open_reparse_point: bool = False,
+                 share: int = FILE_SHARE_READ) -> None:
+        import msvcrt
+
+        flags = FILE_ATTRIBUTE_NORMAL
+        if directory:
+            flags |= FILE_FLAG_BACKUP_SEMANTICS
+        if open_reparse_point:
+            flags |= FILE_FLAG_OPEN_REPARSE_POINT
+        ctypes.set_last_error(0)
+        raw = kernel32.CreateFileW(
+            str(path),
+            GENERIC_READ | READ_CONTROL,
+            share,
+            None,
+            OPEN_EXISTING,
+            flags,
+            None,
+        )
+        if not raw or int(raw) == INVALID_HANDLE_VALUE:
+            raise winerror(f"CreateFileW({path})")
+        self.path = str(path)
+        self.directory = directory
+        self._closed = False
+        self._raw: int | None = None
+        self.fileobj = None
+        if directory:
+            # A directory handle cannot back a Python file object, and nothing reads
+            # bytes from one: it exists for identity and security checks only. The raw
+            # handle is the single owner in this mode.
+            self._raw = int(raw)
+            return
+        try:
+            descriptor = msvcrt.open_osfhandle(int(raw), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except OSError:
+            close_handle(int(raw))
+            raise
+        # From here the file object owns the handle; closing it closes the handle once.
+        self.fileobj = os.fdopen(descriptor, "rb")
+
+    @property
+    def handle(self) -> int:
+        import msvcrt
+
+        if self._closed:
+            raise RecoveryError(f"The handle for {self.path} is already closed.")
+        if self._raw is not None:
+            return self._raw
+        return int(msvcrt.get_osfhandle(self.fileobj.fileno()))
+
+    def _require_file(self) -> None:
+        if self.fileobj is None:
+            raise RecoveryError(f"{self.path} was opened as a directory; it has no contents to read.")
+
+    def final_path(self) -> str:
+        """The canonical path this handle actually refers to, normcased."""
+        buffer = ctypes.create_unicode_buffer(32768)
+        ctypes.set_last_error(0)
+        length = kernel32.GetFinalPathNameByHandleW(
+            wintypes.HANDLE(self.handle), buffer, len(buffer), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS
+        )
+        if not length or length >= len(buffer):
+            raise winerror(f"GetFinalPathNameByHandleW({self.path})")
+        return os.path.normcase(strip_long_path_prefix(buffer.value))
+
+    def attribute_tag(self) -> tuple[int, int]:
+        """Return (attributes, reparse tag) read from the handle, not from the name."""
+        info = FILE_ATTRIBUTE_TAG_INFORMATION()
+        ctypes.set_last_error(0)
+        if not kernel32.GetFileInformationByHandleEx(
+            wintypes.HANDLE(self.handle), FILE_ATTRIBUTE_TAG_INFO, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            raise winerror(f"GetFileInformationByHandleEx({self.path})")
+        return int(info.FileAttributes), int(info.ReparseTag)
+
+    def is_reparse_point(self) -> bool:
+        attributes, tag = self.attribute_tag()
+        return bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT) or tag != 0
+
+    def size(self) -> int:
+        self._require_file()
+        return os.fstat(self.fileobj.fileno()).st_size
+
+    def stat(self) -> os.stat_result:
+        self._require_file()
+        return os.fstat(self.fileobj.fileno())
+
+    def read_chunks(self, chunk: int = 1 << 20):
+        """Yield the whole file from the start, through this handle only."""
+        self._require_file()
+        self.fileobj.seek(0)
+        while True:
+            data = self.fileobj.read(chunk)
+            if not data:
+                return
+            yield data
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._raw is not None:
+            close_handle(self._raw)
+            self._raw = None
+            return
+        try:
+            self.fileobj.close()
+        except OSError:
+            pass
+
+    def __enter__(self) -> "LockedFile":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def open_locked(path: object, **kwargs: object) -> LockedFile:
+    """Open `path` so nobody else can write, rename, or delete it while it is open."""
+    return LockedFile(path, **kwargs)  # type: ignore[arg-type]
+
+
+def file_product_version(path: object) -> str:
+    """Return a file's ProductVersion resource for display, or an empty string.
+
+    Used only to make an error message more helpful; it never decides a verdict.
+    """
+    try:
+        handle = wintypes.DWORD(0)
+        size = version.GetFileVersionInfoSizeW(str(path), ctypes.byref(handle))
+        if not size:
+            return ""
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(str(path), 0, size, buffer):
+            return ""
+        value = wintypes.LPVOID()
+        length = wintypes.UINT()
+        if not version.VerQueryValueW(
+            buffer, r"\StringFileInfo\040904B0\ProductVersion", ctypes.byref(value), ctypes.byref(length)
+        ):
+            return ""
+        if not value.value or not length.value:
+            return ""
+        return str(ctypes.wstring_at(value.value, length.value)).strip(chr(0))
+    except OSError:
+        return ""
 
 
 def program_files_dir() -> Path:

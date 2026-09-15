@@ -10,7 +10,7 @@ import sys
 import time
 import traceback
 
-from . import __version__, events, install, payload, recovery, task, winapi
+from . import __version__, events, install, payload, recovery, task, twin, winapi
 from .elevation import enable_debug_privilege, relaunch_elevated
 from .errors import RecoveryError, SafetyStop
 from .package import AUTO_RECOVERY_APPLICATION, get_claude_package, trigger_identity_problem
@@ -257,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate the historical version-selection invariant without elevation",
     )
     mode.add_argument("--event-triggered", action="store_true", help=argparse.SUPPRESS)
+    mode.add_argument("--print-embedded-twin", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--yes", action="store_true", help="skip the typed REPAIR confirmation")
     parser.add_argument(
         "--wait",
@@ -304,6 +305,16 @@ def event_triggered_exit_code(exit_code: int) -> int:
     return EXIT_INTERNAL_ERROR if exit_code == EXIT_INTERNAL_ERROR else EXIT_OK
 
 
+def print_embedded_twin(reporter: Reporter) -> int:
+    """Print the twin record built into this executable (used by the build smoke test)."""
+    record = twin.load_embedded_twin()
+    if record is None:
+        reporter.emit("EMBEDDED TWIN", "none")
+        return EXIT_ERROR
+    reporter.emit("EMBEDDED TWIN", f"{record.name} {record.sha256} {record.size} {record.version}")
+    return EXIT_OK
+
+
 def main() -> int:
     reporter = Reporter()
     args: argparse.Namespace | None = None
@@ -311,10 +322,15 @@ def main() -> int:
     try:
         winapi.require_windows()
         winapi.configure()
+        # Before anything else, including argument parsing and any lazy import, hold this
+        # executable open so it cannot be renamed and replaced while the process runs.
+        twin.lock_console()
         args = build_parser().parse_args()
         if args.wait < 3 or args.wait > 120:
             raise RecoveryError("--wait must be between 3 and 120 seconds.")
-        if args.self_check:
+        if args.print_embedded_twin:
+            exit_code = print_embedded_twin(reporter)
+        elif args.self_check:
             exit_code = EXIT_OK if recovery.historical_self_check(reporter) else EXIT_ERROR
         elif args.trace:
             exit_code = trace_auto_recovery_events(reporter, args.minutes)
