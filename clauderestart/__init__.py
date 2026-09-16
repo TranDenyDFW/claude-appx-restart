@@ -4,4 +4,4 @@ The version below is the single source of truth; build.py reads it with a regula
 expression, so keep it a plain string literal.
 """
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
