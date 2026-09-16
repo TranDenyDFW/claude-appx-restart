@@ -222,6 +222,19 @@ class TwoStageBuildTests(unittest.TestCase):
             build.twin_record_for_target("console", self.dist)
         self.assertIn("does not match", str(stop.exception))
 
+        same_length = b"THE WINDOWED TWIN"
+        self.assertEqual(len(same_length), len(self.quiet_bytes))
+        self.assertNotEqual(same_length, self.quiet_bytes)
+        (self.dist / "ClaudeRestart-quiet.exe").write_bytes(same_length)
+        with self.assertRaises(SystemExit) as stop:
+            build.twin_record_for_target("console", self.dist)
+        self.assertIn("does not match", str(stop.exception))
+
+        (self.dist / "ClaudeRestart-quiet.exe").unlink()
+        with self.assertRaises(SystemExit) as stop:
+            build.twin_record_for_target("console", self.dist)
+        self.assertIn("no windowed twin", str(stop.exception))
+
         (self.dist / "ClaudeRestart-quiet.exe").write_bytes(self.quiet_bytes)
         self.assertEqual(build.twin_record_for_target("console", self.dist), real)
 

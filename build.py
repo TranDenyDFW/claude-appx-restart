@@ -156,10 +156,14 @@ def twin_record_for_target(target: str, dist: Path | None = None) -> TwinRecord 
     if record.version != current:
         sys.exit(f"The twin record is for version {record.version}, but this source is {current}. Run: py -3 build.py")
     built = dist / record.name
-    if built.is_file():
-        digest, size = sha256(built), built.stat().st_size
-        if digest != record.sha256 or size != record.size:
-            sys.exit(f"The twin record does not match {built}; the stages ran out of order. Run: py -3 build.py")
+    if not built.is_file():
+        sys.exit(
+            f"The console stage has no windowed twin at {built} to check its record against, so the "
+            "record cannot be trusted. Run: py -3 build.py"
+        )
+    digest, size = sha256(built), built.stat().st_size
+    if digest != record.sha256 or size != record.size:
+        sys.exit(f"The twin record does not match {built}; the stages ran out of order. Run: py -3 build.py")
     return record
 
 

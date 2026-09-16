@@ -123,5 +123,90 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(arguments.endswith(task.TASK_ARGUMENTS))
 
 
+class RegisteredTaskVerificationTests(unittest.TestCase):
+    """Whether the task Windows actually holds is the task that was asked for.
+
+    No test named verify_registered_task before, so the comparison that ties the registered
+    action to the executable just installed could be deleted with the whole suite still green.
+    That comparison is the only thing standing between an upgrade and a task still running the
+    previous version.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name).resolve()
+        self.executable = self.folder / payload.QUIET_EXE_NAME
+        self.executable.write_bytes(b"installed twin")
+
+    def status(self, **overrides: object) -> dict[str, object]:
+        subscription = (
+            "<QueryList><Query><Select>*[EventData[Data="
+            f"'{task.AUTO_RECOVERY_APPLICATION}' and Data='{events.SHARE_VIOLATION_DECIMAL}']]"
+            "</Select></Query></QueryList>"
+        )
+        status: dict[str, object] = {
+            "Installed": True,
+            "MultipleInstances": "IgnoreNew",
+            "LogonType": "InteractiveToken",
+            "RunLevel": "HighestAvailable",
+            "ExecutionTimeLimit": "PT5M",
+            "DisallowStartIfOnBatteries": False,
+            "StopIfGoingOnBatteries": False,
+            "Subscription": subscription,
+            "Arguments": task.TASK_ARGUMENTS,
+            "Execute": f'"{self.executable}"',
+        }
+        status.update(overrides)
+        return status
+
+    def verify(self, **overrides: object) -> list[str]:
+        return task.verify_registered_task(self.status(**overrides), task.TASK_ARGUMENTS, self.executable)
+
+    def test_a_correctly_registered_task_has_no_problems(self) -> None:
+        self.assertEqual(self.verify(), [])
+
+    def test_a_task_running_another_executable_is_rejected(self) -> None:
+        other = self.folder / "somewhere-else.exe"
+        other.write_bytes(b"another build")
+        problems = self.verify(Execute=f'"{other}"')
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("the task runs", problems[0])
+        self.assertIn(other.name, problems[0])
+
+    def test_an_unquoted_action_resolves_to_the_same_file(self) -> None:
+        self.assertEqual(
+            task.verify_registered_task(
+                self.status(Execute=str(self.executable)), task.TASK_ARGUMENTS, self.executable
+            ),
+            [],
+        )
+
+    def test_a_task_that_is_not_registered_reports_only_that(self) -> None:
+        self.assertEqual(self.verify(Installed=False), ["the task is not registered"])
+
+    def test_every_wrong_setting_is_named(self) -> None:
+        cases = {
+            "MultipleInstances": ("Parallel", "MultipleInstances"),
+            "LogonType": ("Password", "LogonType"),
+            "RunLevel": ("Limited", "RunLevel"),
+            "ExecutionTimeLimit": ("PT72H", "ExecutionTimeLimit"),
+            "DisallowStartIfOnBatteries": (True, "battery"),
+            "StopIfGoingOnBatteries": (True, "unplugged"),
+            "Arguments": ("--yes", "arguments"),
+        }
+        for field, (value, expected) in cases.items():
+            with self.subTest(field=field):
+                problems = self.verify(**{field: value})
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(expected, problems[0])
+
+    def test_a_subscription_that_does_not_name_the_failure_is_rejected(self) -> None:
+        self.assertIn("no event subscription", self.verify(Subscription="")[0])
+        self.assertIn("does not name the Claude application", self.verify(Subscription="<QueryList/>")[0])
+        naming_app = f"<QueryList>{task.AUTO_RECOVERY_APPLICATION}</QueryList>"
+        self.assertIn("does not name the sharing violation", self.verify(Subscription=naming_app)[0])
+
+
 if __name__ == "__main__":
     unittest.main()
