@@ -91,7 +91,8 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | A confirmed expected id may install | tests/test_package_identity.py::test_one_application_is_confirmed, tests/test_package_identity.py::test_several_applications_with_exactly_one_expected_id_resolve |
 | A confirmed different id names both observed and expected identities | tests/test_package_identity.py::test_one_different_application_is_confirmed_but_reported |
 | The underlying manifest error is preserved in diagnostics | tests/test_package_identity.py::test_manifest_failure_is_unknown_and_keeps_the_error |
-| Nothing is terminated while the identity is unknown | tests/test_cli.py::test_manual_run_refuses_before_touching_jobs, tests/test_cli.py::test_event_triggered_run_refuses_and_reports_zero_to_the_scheduler, tests/test_cli.py::test_scan_stays_read_only_and_still_reports |
+| Nothing is terminated while the identity is unknown | tests/test_cli.py::test_manual_run_refuses_before_touching_jobs, tests/test_cli.py::test_event_triggered_run_refuses_and_reports_zero_to_the_scheduler, tests/test_cli.py::test_scan_stays_read_only_when_appinfo_is_stopped |
+| A scan still reports a stale Job and exits 10 when the identity is unknown | tests/test_cli.py::test_scan_reports_a_stale_job_even_when_the_identity_is_unknown |
 
 ## P2 Preserve logs when elevation does not start
 

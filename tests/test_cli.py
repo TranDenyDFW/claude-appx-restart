@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -99,13 +100,54 @@ class UnknownIdentityRunTests(unittest.TestCase):
         # main maps a safety stop to 0 for an event-triggered run, with the reason logged.
         self.assertEqual(cli.event_triggered_exit_code(cli.EXIT_SAFETY_STOP), cli.EXIT_OK)
 
-    def test_scan_stays_read_only_and_still_reports(self) -> None:
+    def test_scan_stays_read_only_when_appinfo_is_stopped(self) -> None:
         reporter, calls = self.run_with_unknown_identity(["--scan"])
         self.assertEqual(self.outcome, cli.EXIT_OK)
         calls["appinfo"].assert_called_once()
         calls["terminate"].assert_not_called()
         calls["launch"].assert_not_called()
         self.assertTrue(any(line.startswith("[WARN]") for line in reporter.lines), reporter.lines)
+
+    def test_scan_reports_a_stale_job_even_when_the_identity_is_unknown(self) -> None:
+        """A scan must still report what it found, and say so in its exit code.
+
+        The other scan test stops Appinfo, which returns before any Job is discovered, so it
+        could never reach the stale report or the exit code that tells a caller something was
+        found. An unknown identity refuses every other command, and must not silence a scan.
+        """
+        args = cli.build_parser().parse_args(["--scan"])
+        reporter = reporting.Reporter()
+        job = SimpleNamespace(
+            name=r"\Container_Claude_1.0.0.0_x64__pzs8sxrjxfjjc-S-1-5-21-1-2-3-1001",
+            pids=[101, 102],
+            handle=1,
+        )
+        probe = {"available": True, "error": "", "active": 2, "limit": None}
+        with mock.patch.object(cli, "get_claude_package", return_value=self.unknown()), mock.patch.object(
+            cli.recovery, "get_appinfo_pid", return_value=4242
+        ), mock.patch.object(
+            cli.recovery, "discover_claude_jobs", return_value=[job]
+        ), mock.patch.object(
+            cli.recovery, "classify_jobs", return_value=([job], [])
+        ), mock.patch.object(
+            cli.recovery, "process_details", return_value=[]
+        ), mock.patch.object(
+            cli.recovery, "probe_freeze", return_value=probe
+        ), mock.patch.object(
+            cli.recovery, "close_job_records"
+        ), mock.patch.object(
+            cli.recovery, "repair_stale_job"
+        ) as terminate, mock.patch.object(
+            cli.recovery, "launch_and_verify", return_value=True
+        ) as launch, mock.patch.object(cli.events, "auto_recovery_events", return_value=[]):
+            outcome = cli.run(args, reporter)
+
+        self.assertEqual(outcome, cli.EXIT_STALE_FOUND)
+        self.assertTrue(any(line.startswith("[WARN]") for line in reporter.lines), reporter.lines)
+        self.assertTrue(any(line.startswith("[STALE]") for line in reporter.lines), reporter.lines)
+        self.assertTrue(any(line.startswith("[DRY-RUN]") for line in reporter.lines), reporter.lines)
+        terminate.assert_not_called()
+        launch.assert_not_called()
 
 
 if __name__ == "__main__":

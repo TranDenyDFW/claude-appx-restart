@@ -117,7 +117,7 @@ jobs:
           manifest = json.loads(pathlib.Path("dist/release-manifest.json").read_text(encoding="utf-8"))
           if manifest.get("tag") != tag:
               sys.exit(f"the build is for {manifest.get('tag')}, not {tag}")
-          if manifest.get("commit") not in (None, "", built):
+          if manifest.get("commit") != built:
               sys.exit(f"the build is from commit {manifest.get('commit')}, not {built}")
           assets = {entry["name"]: entry for entry in manifest["assets"]}
           sums = {}
@@ -269,7 +269,7 @@ jobs:
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Content-Type: application/octet-stream" \
               --data-binary "@dist/$name" \
-              "$upload_url?name=$name" > /dev/null
+              "$upload_url?name=$name&label=$name" > /dev/null
             # Fail fast: a bad upload leaves the release a draft, never published.
             load_assets "$release_id"
             ASSET_NAME="$name" python3 - <<'PY'

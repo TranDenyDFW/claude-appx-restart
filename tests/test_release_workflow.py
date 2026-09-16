@@ -135,7 +135,11 @@ if state.get("fail_next") and state["fail_next"] in " ".join(argv):
 
 if tool == "curl":
     target = [a for a in argv if a.startswith("http")][0]
-    name = target.split("name=")[1]
+    # Parse the query the way the real endpoint does: the upload URL carries name and
+    # label, so slicing at name= and taking the rest swallows every later parameter.
+    query = target.split("?", 1)[1] if "?" in target else ""
+    fields = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+    name = fields["name"]
     upload = state.setdefault("uploaded", [])
     upload.append(name)
     release = state["releases"][str(state["draft_id"])]
@@ -284,6 +288,13 @@ class ReleaseScriptTests(unittest.TestCase):
         self.calls_path.write_text("", encoding="utf-8")
         self.script = self.work / "release.sh"
         self.script.write_text(release_script(), encoding="utf-8", newline="\n")
+
+    def rewrite_manifest(self, **overrides: object) -> None:
+        """Change one field of the build manifest the release job reads."""
+        path = self.dist / "release-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest.update(overrides)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def state(self, **overrides: object) -> None:
         state = {
@@ -439,15 +450,53 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertEqual(mutating, [], self.calls())
 
     def test_a_manifest_that_disagrees_with_the_checksums_is_refused(self) -> None:
-        sums = self.dist / "SHA256SUMS.txt"
-        lines = sums.read_text(encoding="utf-8").splitlines()
-        lines[0] = "0" * 64 + lines[0][64:]
-        sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # Change the manifest, not the checksum file. Tampering the file is caught first by
+        # the manifest's own entry for that file, so the agreement rule between the two would
+        # never be the thing that refused, and this scenario would pass for the wrong reason.
+        path = self.dist / "release-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        for entry in manifest["assets"]:
+            if entry["name"] == "ClaudeRestart-quiet.exe":
+                entry["sha256"] = "0" * 64
+        path.write_text(json.dumps(manifest), encoding="utf-8")
         self.state()
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
         self.assertEqual(mutating, [], self.calls())
+
+    def test_a_manifest_from_another_commit_is_refused(self) -> None:
+        self.rewrite_manifest(commit="9" * 40)
+        self.state()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
+        self.assertEqual(mutating, [], self.calls())
+
+    def test_a_manifest_with_no_commit_is_refused(self) -> None:
+        # A manifest built outside Actions carries no commit, and must not be publishable.
+        self.rewrite_manifest(commit=None)
+        self.state()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
+        self.assertEqual(mutating, [], self.calls())
+
+    def test_a_manifest_for_another_tag_is_refused(self) -> None:
+        self.rewrite_manifest(tag="v9.9.9")
+        self.state()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
+        self.assertEqual(mutating, [], self.calls())
+
+    def test_an_asset_that_reports_no_digest_stops_before_publishing(self) -> None:
+        # An asset GitHub has not finished hashing has a null digest. There is nothing to
+        # compare against, so it must be refused rather than treated as a match.
+        self.state(no_digest="ClaudeRestart-quiet.exe")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
 
     def test_an_annotated_tag_that_peels_to_the_built_commit_publishes(self) -> None:
         self.state(annotated_tag=True)

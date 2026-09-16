@@ -102,6 +102,25 @@ class VerifyRootTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("[REPAIR]") for line in self.reporter.lines), self.reporter.lines)
         self.assertTrue(install.versions_dir(self.root).is_dir())
 
+    def test_a_repair_that_cannot_proceed_is_a_safety_stop(self) -> None:
+        # Enabling the privileges a repair needs can fail. The create path already reports that
+        # as a safety stop; this path let a plain error through, so the same condition produced
+        # "error" and exit 1 instead of "nothing was changed" and exit 2.
+        from clauderestart.errors import RecoveryError
+
+        self.root.mkdir()
+        backend = support.FakeFileSecurity(
+            verdicts=[
+                ok_report(),
+                repairable_report("the permission list still inherits from Program Files"),
+            ],
+            apply_error=RecoveryError("a required privilege is not held by the client"),
+        )
+        with self.assertRaises(SafetyStop) as stop:
+            install.verify_root(self.reporter, backend, self.root)
+        self.assertIn("could not be corrected", str(stop.exception))
+        self.assertIn("a required privilege", str(stop.exception))
+
     def test_a_repair_that_does_not_hold_is_refused(self) -> None:
         self.root.mkdir()
         backend = support.FakeFileSecurity(

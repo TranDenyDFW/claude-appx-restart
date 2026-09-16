@@ -141,7 +141,11 @@ class SmokeTestTests(unittest.TestCase):
         self.assertIn("did not produce ClaudeRestart-quiet.exe", str(stop.exception))
 
     def test_read_version_matches_the_module_constant(self) -> None:
+        import clauderestart
+
         self.assertRegex(build.read_version(), r"^\d+\.\d+\.\d+$")
+        # Without this the build could embed one version while the package reports another.
+        self.assertEqual(build.read_version(), clauderestart.__version__)
 
 
 class TwoStageBuildTests(unittest.TestCase):

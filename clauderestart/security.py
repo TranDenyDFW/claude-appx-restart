@@ -122,7 +122,14 @@ def _ace_problems(aces: Iterable[winapi.AceEntry], *, inherited: bool) -> tuple[
                 f"ACE {ace.index} grants {describe_write_bits(ace.mask & WRITE_CLASS_MASK)} to {ace.sid}"
             )
             problems.append(message)
-            blocking.append(message)
+            # An inherit-only CREATOR OWNER entry grants nothing on this folder: it is the
+            # template Program Files hands to new children, and the repair replaces the whole
+            # list. It stays a problem, so the list is still not canonical and is repaired,
+            # but it must not block, or every folder inheriting the Program Files default is
+            # refused and the user is told to delete a folder that is not actually unsafe.
+            seed_only = ace.sid == SID_CREATOR_OWNER and ace.flags & winapi.INHERIT_ONLY_ACE
+            if not seed_only:
+                blocking.append(message)
         observed.append((ace.sid, ace.mask))
     if sorted(observed) != sorted(CANONICAL_ACES):
         rendered = ", ".join(f"{sid}:0x{mask:08X}" for sid, mask in observed) or "none"

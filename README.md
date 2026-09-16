@@ -76,6 +76,13 @@ Open a terminal in `C:\Program Files\ClaudeRestart\versions\<version>-<id>` (or 
 
 `--automation-status` reports the exact file the task runs, whether that file sits inside the protected folder, whether the folder is still administrator-only, and whether the installed files still match what was installed.
 
+On a machine where nothing has been installed yet, it says so rather than failing:
+
+```text
+[EXECUTABLE] C:\Python314\pythonw.exe (not under the protected folder)
+[ROOT] not installed (C:\Program Files\ClaudeRestart is absent)
+```
+
 `--scan` also reports, for every Claude Job it finds, whether that Job's membership could be frozen. An obsolete Job exists only while the failure is happening, so this is the way to find out beforehand that a repair would work.
 
 Every run writes `last-run.log` next to the executable that ran, or to `%LOCALAPPDATA%\ClaudeRestart\last-run.log` when that folder is read-only. Automatic recovery therefore logs to `C:\Program Files\ClaudeRestart\versions\<version>-<id>\last-run.log`, while status and trace commands run without administrator rights log to `%LOCALAPPDATA%\ClaudeRestart\last-run.log`. When a run asks for administrator access and the elevated run never starts, the reason is written to the log rather than lost.

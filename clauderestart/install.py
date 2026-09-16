@@ -54,7 +54,14 @@ def _remove_empty(path: Path) -> None:
 
 def _create_owned_dir(path: Path, backend: security.FileSecurity, reporter: Reporter) -> None:
     """Create a folder this installer owns, protect it, and prove it, or leave nothing."""
-    path.mkdir()
+    try:
+        path.mkdir()
+    except FileExistsError as exc:
+        # The identifier is random, so something else put this here. It is neither used nor
+        # removed: this did not create it, and deleting another program's folder is not safe.
+        raise SafetyStop(f"{path} already exists, so nothing was installed. " + REMOVE_BY_HAND) from exc
+    except OSError as exc:
+        raise SafetyStop(f"{path} could not be created: {exc}") from exc
     try:
         locked = security.open_for_repair(path)
         try:
@@ -102,6 +109,8 @@ def _verify_owned_dir(path: Path, backend: security.FileSecurity, reporter: Repo
     try:
         backend.apply_owned_dir(locked)
         report = backend.verify_owned_dir(locked)
+    except (RecoveryError, OSError) as exc:
+        raise SafetyStop(f"{path} could not be corrected ({exc}). " + REMOVE_BY_HAND) from exc
     finally:
         locked.close()
     if not report.ok:
@@ -467,6 +476,17 @@ def _verify_committed(
     twin_sha: str,
 ) -> None:
     """Re-prove the committed folder through fresh handles, after the rename."""
+    directory = _open_owned_dir(final)
+    try:
+        if directory.is_reparse_point() or directory.final_path() != winapi.canonical(final):
+            raise SafetyStop(f"{final} did not resolve to itself after it was put in place.")
+        folder_report = backend.verify_owned_dir(directory)
+    finally:
+        directory.close()
+    if not folder_report.ok:
+        raise SafetyStop(
+            f"{final} is not administrator-only after the rename: " + "; ".join(folder_report.problems)
+        )
     if locked.is_reparse_point() or locked.final_path() != winapi.canonical(final / payload.QUIET_EXE_NAME):
         raise SafetyStop(f"{final} did not resolve to itself after it was put in place.")
     digest = hashlib.sha256()

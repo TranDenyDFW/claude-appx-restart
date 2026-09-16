@@ -44,12 +44,17 @@ def release_for(tag: str, repo: str, token: str | None) -> dict:
 
 
 def expected_names(version: str) -> tuple[str, ...]:
-    return (
-        f"ClaudeRestart-v{version}-win-x64.zip",
-        "ClaudeRestart.exe",
-        "ClaudeRestart-quiet.exe",
-        "SHA256SUMS.txt",
-    )
+    """The release asset names, from the one definition the build and the application share.
+
+    Keeping a second copy here would let a rename pass this check while the release it is
+    checking no longer matches.
+    """
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from clauderestart import payload
+
+    return tuple(payload.release_asset_names(version))
 
 
 def authenticode_status(path: Path) -> str:

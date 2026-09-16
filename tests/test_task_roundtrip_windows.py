@@ -30,6 +30,7 @@ class TaskRoundTripTests(unittest.TestCase):
     def setUp(self) -> None:
         winapi.configure()
         self.name = f"ClaudeRestart-Test-{secrets.token_hex(4)}"
+        self.sid = ""  # filled in by current_sid, and compared across the round trip
         # Registered before anything else, so an assertion failure still removes the task.
         self.addCleanup(task.delete_task, self.name)
         self.executable = Path(sys.executable).resolve()
@@ -46,6 +47,7 @@ class TaskRoundTripTests(unittest.TestCase):
             "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
         ).strip()
         self.assertTrue(sid.startswith("S-1-"), sid)
+        self.sid = sid
         return sid
 
     def test_a_registered_task_survives_an_export_and_a_restore(self) -> None:
@@ -55,6 +57,10 @@ class TaskRoundTripTests(unittest.TestCase):
         self.assertEqual(
             task.verify_registered_task(status, task.TASK_ARGUMENTS, self.executable), [], status
         )
+
+        # The principal decides which account runs the task and at what level. An export
+        # that dropped it would restore a task that never fires for this user.
+        self.assertEqual(status.get("UserId"), self.sid, status)
 
         exported = task.export_task_xml(self.name)
         self.assertTrue(exported.strip(), "the export must not be empty")
@@ -69,6 +75,9 @@ class TaskRoundTripTests(unittest.TestCase):
         self.assertEqual(
             task.verify_registered_task(restored, task.TASK_ARGUMENTS, self.executable), [], restored
         )
+        self.assertEqual(restored.get("UserId"), self.sid, restored)
+        self.assertEqual(restored.get("LogonType"), status.get("LogonType"))
+        self.assertEqual(restored.get("RunLevel"), status.get("RunLevel"))
 
     def test_an_absent_task_reports_itself_absent(self) -> None:
         # The installer decides whether there was a task from this, never from an export.

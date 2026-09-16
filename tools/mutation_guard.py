@@ -187,6 +187,43 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
           gh api -X PATCH""",
         ("tests.test_release_workflow",),
     ),
+    (
+        "treating an inherit-only creator-owner entry as repairable rather than blocking",
+        "clauderestart/security.py",
+        """            seed_only = ace.sid == SID_CREATOR_OWNER and ace.flags & winapi.INHERIT_ONLY_ACE
+            if not seed_only:
+                blocking.append(message)""",
+        "            blocking.append(message)",
+        ("tests.test_security",),
+    ),
+    (
+        'refusing a staged file that is a reparse point',
+        'clauderestart/install.py',
+        '            if locked.is_reparse_point():\n                raise SafetyStop(f"{relative} in {staging} is a reparse point.")',
+        '            if False:\n                raise SafetyStop("unused")',
+        INSTALL_TESTS,
+    ),
+    (
+        'refusing a staged file that resolves outside the staged folder',
+        'clauderestart/install.py',
+        '            if not locked.final_path().startswith(winapi.canonical(staging)):\n                raise SafetyStop(f"{relative} in {staging} resolves outside the staged folder.")',
+        '            if False:\n                raise SafetyStop("unused")',
+        INSTALL_TESTS,
+    ),
+    (
+        'refusing a staged file whose permissions are not what was applied',
+        'clauderestart/install.py',
+        '            report = backend.verify_child(locked)\n            if not report.ok:\n                raise SafetyStop(f"{relative} in {staging} has unexpected permissions: " + "; ".join(report.problems))',
+        '            report = backend.verify_child(locked)',
+        INSTALL_TESTS,
+    ),
+    (
+        'the release manifest agreeing with the checksum file',
+        '.github/workflows/build.yml',
+        '              if assets[name]["sha256"] != digest:\n                  sys.exit(f"SHA256SUMS.txt and the manifest disagree about {name}")',
+        '              if False:\n                  sys.exit("unused")',
+        ("tests.test_release_workflow",),
+    ),
 ]
 
 

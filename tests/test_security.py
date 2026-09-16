@@ -39,6 +39,29 @@ class OwnedFolderVerdictTests(unittest.TestCase):
         self.assertTrue(report.repairable, report.problems)
         self.assertTrue(any("inherits" in problem for problem in report.problems), report.problems)
 
+    def test_the_inherit_only_creator_owner_entry_is_repairable_not_blocking(self) -> None:
+        """The entry Program Files seeds children with must not refuse the folder.
+
+        It grants nothing on the folder itself, and the repair replaces the whole list, so
+        blocking on it would refuse exactly the pre-existing folders the repair exists for.
+        """
+        report = security.verify_sddl(CANONICAL + "(A;OICIIO;GA;;;CO)")
+        self.assertFalse(report.ok)
+        self.assertEqual(report.blocking, [], report.blocking)
+        self.assertTrue(report.repairable, report.problems)
+
+    def test_a_creator_owner_entry_that_applies_to_the_folder_is_blocking(self) -> None:
+        # Without the inherit-only flag the same entry really does grant on this folder.
+        report = security.verify_sddl(CANONICAL + "(A;OICI;GA;;;CO)")
+        self.assertFalse(report.ok)
+        self.assertTrue(report.blocking, report.problems)
+
+    def test_an_inherit_only_entry_for_another_principal_is_still_blocking(self) -> None:
+        # The exception is for CREATOR OWNER alone, not for inherit-only entries in general.
+        report = security.verify_sddl(CANONICAL + "(A;OICIIO;GA;;;BU)")
+        self.assertFalse(report.ok)
+        self.assertTrue(report.blocking, report.problems)
+
     def test_write_access_for_users_is_blocking(self) -> None:
         report = security.verify_sddl("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)")
         self.assertFalse(report.ok)

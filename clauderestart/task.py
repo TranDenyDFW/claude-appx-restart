@@ -112,6 +112,7 @@ $action = @($task.Actions)[0]
     MultipleInstances = $task.Settings.MultipleInstances.ToString()
     LogonType = $task.Principal.LogonType.ToString()
     RunLevel = $task.Principal.RunLevel.ToString()
+    UserId = [string]$task.Principal.UserId
     Subscription = [string]$trigger.Subscription
     Execute = [string]$action.Execute
     Arguments = [string]$action.Arguments
@@ -282,7 +283,7 @@ def register_task_xml(xml_text: str, name: str = AUTO_RECOVERY_TASK_NAME) -> Non
             pass
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
-        raise RecoveryError(f"Could not register {AUTO_RECOVERY_TASK_NAME}: {detail}")
+        raise RecoveryError(f"Could not register {name}: {detail}")
 
 
 def delete_task(name: str = AUTO_RECOVERY_TASK_NAME) -> subprocess.CompletedProcess[str]:

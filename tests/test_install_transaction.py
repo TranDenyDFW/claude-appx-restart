@@ -237,6 +237,24 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("runs a different file from the one installed", str(stop.exception))
         self.assertEqual(tasks.deleted, 1, "a task that cannot be verified is taken back out")
 
+    def test_a_staging_name_that_already_exists_is_a_safety_stop(self) -> None:
+        # The identifier is random, so a collision means something else put that folder there.
+        # It is not used and not deleted, and the run reports that nothing was changed.
+        identifier = "abcdef12"
+        versions = install.versions_dir(self.root)
+        versions.mkdir(parents=True)
+        staging = versions / f"{VERSION}{payload.STAGING_SUFFIX}-{identifier}"
+        staging.mkdir()
+        planted = staging / "planted.txt"
+        planted.write_text("a file this installer never wrote", encoding="utf-8")
+        tasks = support.FakeTaskBackend()
+        with mock.patch.object(install.secrets, "token_hex", return_value=identifier):
+            with self.assertRaises(SafetyStop) as stop:
+                self.install(tasks)
+        self.assertIn("already exists", str(stop.exception))
+        self.assertTrue(planted.is_file(), "a folder this did not create is never removed")
+        self.assertEqual(tasks.registered, [])
+
     def test_a_failure_while_staging_leaves_the_previous_install_untouched(self) -> None:
         first = self.seed_previous_version()
         before_tree = support.tree_hash(first)
@@ -452,6 +470,51 @@ class StagedAndCommittedVerificationTests(unittest.TestCase):
     def test_a_correct_committed_folder_passes(self) -> None:
         self.verify_committed()
 
+    def staged_handle(self, *, reparse: bool = False, final: str | None = None):
+        """A stand-in for one staged file's handle, so the refusals can be reached.
+
+        Neither a reparse point nor a path resolving outside the folder can be produced with
+        an ordinary file: both refusals exist for states someone else creates. Injecting the
+        handle is the only way to reach them deterministically.
+        """
+        from types import SimpleNamespace
+
+        real = winapi.open_locked(self.quiet, open_reparse_point=True)
+        self.addCleanup(real.close)
+        return SimpleNamespace(
+            is_reparse_point=lambda: reparse,
+            final_path=lambda: final if final is not None else real.final_path(),
+            close=lambda: None,
+            stat=real.stat,
+            read_chunks=real.read_chunks,
+        )
+
+    def test_a_staged_file_that_is_a_reparse_point_stops_the_install(self) -> None:
+        handle = self.staged_handle(reparse=True)
+        with mock.patch.object(install.winapi, "open_locked", return_value=handle):
+            with self.assertRaises(SafetyStop) as stop:
+                self.verify_staged()
+        self.assertIn("is a reparse point", str(stop.exception))
+
+    def test_a_staged_file_resolving_outside_the_folder_stops_the_install(self) -> None:
+        handle = self.staged_handle(final=str(self.folder.parent / "elsewhere.exe"))
+        with mock.patch.object(install.winapi, "open_locked", return_value=handle):
+            with self.assertRaises(SafetyStop) as stop:
+                self.verify_staged()
+        self.assertIn("resolves outside the staged folder", str(stop.exception))
+
+    def test_a_staged_file_with_unexpected_permissions_stops_the_install(self) -> None:
+        from clauderestart.security import AclReport
+
+        problem = "another account can write this file"
+        self.security = support.FakeFileSecurity(
+            child_verdict=AclReport(False, "S-1-5-32-544", [problem], [problem])
+        )
+        with self.assertRaises(SafetyStop) as stop:
+            self.verify_staged()
+        self.assertIn("unexpected permissions", str(stop.exception))
+        self.assertIn(problem, str(stop.exception))
+
     def test_a_file_that_is_not_part_of_the_release_stops_the_install(self) -> None:
         (self.folder / "extra.dll").write_bytes(b"planted beside the staged payload")
         with self.assertRaises(SafetyStop) as stop:
@@ -462,6 +525,20 @@ class StagedAndCommittedVerificationTests(unittest.TestCase):
         with self.assertRaises(SafetyStop) as stop:
             self.verify_staged(twin_sha="0" * 64)
         self.assertIn("not the one this build was made with", str(stop.exception))
+
+    def test_a_committed_folder_that_is_not_protected_is_refused(self) -> None:
+        # The rename puts the payload at a new name, so the folder's protection is proved again
+        # there rather than assumed to have travelled with it.
+        from clauderestart.security import AclReport
+
+        problem = "another account can write here"
+        self.security = support.FakeFileSecurity(
+            verdicts=[AclReport(False, "S-1-5-32-544", [problem], [problem])]
+        )
+        with self.assertRaises(SafetyStop) as stop:
+            self.verify_committed()
+        self.assertIn(problem, str(stop.exception))
+        self.assertIn("after the rename", str(stop.exception))
 
     def test_a_committed_twin_that_is_not_the_authenticated_one_is_refused(self) -> None:
         with self.assertRaises(SafetyStop) as stop:
