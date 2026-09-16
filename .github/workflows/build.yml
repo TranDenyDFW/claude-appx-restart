@@ -34,7 +34,7 @@ jobs:
         # The runner is elevated, so every elevation gated control must actually run here.
         # A plain discovery exits 0 whether they run or skip, which makes a green job
         # indistinguishable from one where the controls never executed.
-        run: python tools/run_tests.py --forbid-skips
+        run: python tools/unit_tests.py --forbid-skips
 
       - name: Every acceptance row names a test that exists
         run: python tools/check_acceptance.py

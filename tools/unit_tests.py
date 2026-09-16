@@ -6,8 +6,8 @@ here are gated on elevation, so a runner that counts a skip as success cannot te
 control from an absent one: a green job would look identical either way. Continuous
 integration runs elevated, so it forbids skips and names any that occur.
 
-    py -3 tools/run_tests.py
-    py -3 tools/run_tests.py --forbid-skips
+    py -3 tools/unit_tests.py
+    py -3 tools/unit_tests.py --forbid-skips
 """
 
 from __future__ import annotations
