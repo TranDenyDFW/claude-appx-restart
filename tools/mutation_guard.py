@@ -273,6 +273,83 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         '          extra = set(assets) - set(sums)',
         ("tests.test_release_workflow",),
     ),
+    (
+        "matching the error dialog title to this package's install folder",
+        'clauderestart/dialogs.py',
+        '    if not separator or not rules.folder_pattern.match(folder):\n',
+        '    if not separator:\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        "matching the error dialog title to this package's executable",
+        'clauderestart/dialogs.py',
+        '    if remainder != os.path.normcase(os.path.normpath(package.application_executable)):\n',
+        '    if False:\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'requiring the error dialog to be shown by the Windows shell',
+        'clauderestart/dialogs.py',
+        '    if not image or os.path.normcase(image) not in rules.allowed_owners:\n',
+        '    if not image:\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'requiring the error dialog to be a task dialog before WM_USER+102 is sent',
+        'clauderestart/dialogs.py',
+        '    if not any(name == TASK_DIALOG_SURFACE for _child, name in classes):\n',
+        '    if False:\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        "requiring the error dialog to be in this user's session",
+        'clauderestart/dialogs.py',
+        '    if rules.session is None or backend.session(pid) != rules.session:\n',
+        '    if False:\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'requiring a logged sharing violation before closing the error dialog',
+        'clauderestart/dialogs.py',
+        '        if not logged:\n',
+        '        if False:\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'closing only a dialog that is still the window recorded before launch',
+        'clauderestart/dialogs.py',
+        '    if not _still_the_same(window, rules, backend):\n        if _closed(window, backend):\n',
+        '    if False:\n        if _closed(window, backend):\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'counting the error dialog closed only when it is gone',
+        'clauderestart/dialogs.py',
+        '    return not backend.exists(window.hwnd) or backend.pid(window.hwnd) != window.pid\n',
+        '    return True\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'counting a window handle reused by another process as closed',
+        'clauderestart/dialogs.py',
+        '    return not backend.exists(window.hwnd) or backend.pid(window.hwnd) != window.pid\n',
+        '    return not backend.exists(window.hwnd)\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        'closing the error dialog only after GREEN, never after VISIBLE',
+        'clauderestart/recovery.py',
+        '    else:\n        reporter.emit(\n            "VISIBLE",\n',
+        '    else:\n        dialogs.dismiss_after_green(package, before_launch, reporter)\n        reporter.emit(\n            "VISIBLE",\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        "pressing the task dialog's OK button rather than asking it to close",
+        'clauderestart/dialogs.py',
+        '            winapi.TDM_CLICK_BUTTON,\n',
+        '            winapi.WM_CLOSE,\n',
+        ("tests.test_dialogs_windows",),
+    ),
 ]
 
 
@@ -286,8 +363,17 @@ def run(subject: Path, modules: tuple[str, ...]) -> subprocess.CompletedProcess[
 
 
 def main() -> int:
+    # --match TEXT runs only the entries whose label contains TEXT, for proving new entries
+    # quickly while developing. Continuous integration always runs every entry.
+    selected = MUTATIONS
+    if "--match" in sys.argv:
+        needle = sys.argv[sys.argv.index("--match") + 1].lower()
+        selected = [entry for entry in MUTATIONS if needle in entry[0].lower()]
+        if not selected:
+            print(f"no entry label contains {needle!r}", file=sys.stderr)
+            return 1
     survivors: list[str] = []
-    for label, relative, old, new, modules in MUTATIONS:
+    for label, relative, old, new, modules in selected:
         with tempfile.TemporaryDirectory() as work:
             subject = Path(work) / "subject"
             shutil.copytree(ROOT, subject, ignore=IGNORE)
@@ -314,8 +400,8 @@ def main() -> int:
                 summary = [line for line in mutated.stderr.splitlines() if line.strip()][-1]
                 print(f"CAUGHT   {label} ({summary})")
 
-    caught = len(MUTATIONS) - len(survivors)
-    print(f"\n{caught}/{len(MUTATIONS)} mutation(s) caught")
+    caught = len(selected) - len(survivors)
+    print(f"\n{caught}/{len(selected)} mutation(s) caught")
     if survivors:
         print("\nThese behaviours can be removed without any test noticing:", file=sys.stderr)
         for label in survivors:

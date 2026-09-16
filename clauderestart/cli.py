@@ -11,7 +11,7 @@ import sys
 import time
 import traceback
 
-from . import __version__, events, install, payload, recovery, task, twin, winapi
+from . import __version__, dialogs, events, install, payload, recovery, task, twin, winapi
 from .elevation import enable_debug_privilege, relaunch_elevated
 from .errors import RecoveryError, SafetyStop
 from .package import AUTO_RECOVERY_APPLICATION, get_claude_package, trigger_identity_problem
@@ -88,6 +88,31 @@ def show_auto_recovery_status(reporter: Reporter) -> int:
         install.installed_state(reporter, root)
     except (RecoveryError, OSError) as exc:
         reporter.emit("EXECUTABLE", f"{registered} (the protected folder could not be read: {exc})")
+    return EXIT_OK
+
+
+def show_error_dialogs(reporter: Reporter) -> int:
+    """List the Claude error dialogs that are open, and whether recovery would close each.
+
+    Read only: nothing is pressed or closed here. Recovery closes a dialog only after it has
+    proved Claude is running, so this is how to see beforehand what it would do.
+    """
+    package = get_claude_package()
+    found = dialogs.candidates(package)
+    if not found:
+        reporter.emit("DIALOGS", "No dialog mentioning this Claude package is open.")
+        return EXIT_OK
+    for item in found:
+        verdict = (
+            "recovery would close it once Claude is verified running"
+            if item.matches
+            else "recovery would leave it open: " + "; ".join(item.reasons)
+        )
+        reporter.emit(
+            "DIALOG",
+            f"hwnd 0x{item.hwnd:X}, pid {item.pid} ({item.image or 'owner unreadable'}), "
+            f"title {item.title}: {verdict}.",
+        )
     return EXIT_OK
 
 
@@ -246,6 +271,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate the historical version-selection invariant without elevation",
     )
+    mode.add_argument(
+        "--error-dialogs",
+        action="store_true",
+        help="list open Claude error dialogs and whether recovery would close them (read only)",
+    )
     mode.add_argument("--event-triggered", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--print-embedded-twin", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--yes", action="store_true", help="skip the typed REPAIR confirmation")
@@ -336,6 +366,8 @@ def main() -> int:
             exit_code = trace_auto_recovery_events(reporter, args.minutes)
         elif args.automation_status:
             exit_code = show_auto_recovery_status(reporter)
+        elif args.error_dialogs:
+            exit_code = show_error_dialogs(reporter)
         elif args.event_triggered and not winapi.is_admin():
             raise RecoveryError(
                 "The scheduled task is not running elevated; reinstall automatic recovery "

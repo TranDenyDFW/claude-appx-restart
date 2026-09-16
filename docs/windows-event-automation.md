@@ -174,6 +174,36 @@ Inspect or remove it:
 ```
 
 The event-triggered recovery reacts after Windows records the failed normal
-Claude click, so the error dialog can briefly appear. Using `Start Claude
+Claude click, so the error dialog still appears. Using `Start Claude
 Safely.cmd` remains the preflight option that checks for a stale Job before the
 first activation attempt.
+
+## Closing the error dialog
+
+The dialog from the failed click is a TaskDialog shown by `sihost.exe`, titled with the
+path of the Claude executable that could not start, for example
+`C:\Program Files\WindowsApps\Claude_2.110.0.0_x64__pzs8sxrjxfjjc\app\claude.exe`. It
+stays open after recovery has fixed the cause, so recovery closes it, under these rules:
+
+1. The dialogs are recorded before Claude is launched, so a dialog raised by a click after
+   the launch is never among them.
+2. Nothing is closed unless the launch ends GREEN: a visible Claude window and no new
+   `0x80070020` event. A VISIBLE result could not check for new events, so it closes nothing.
+3. Windows must have logged Event 208 with `0x80070020` for this package in the last ten
+   minutes, so the dialog is tied to the failure that was fixed.
+4. Each dialog must still be the same window, owned by the same process, with the same title.
+5. It must be a visible, unowned `#32770` window in this user's session, owned by exactly
+   `System32\sihost.exe` or `explorer.exe` in the Windows folder the shell reports.
+6. Its title must be a path under the folder Claude is installed in, naming a folder of this
+   package family (any version) and the application's executable from the manifest.
+7. It must be a task dialog, with a `DirectUIHWND` surface and an enabled button. The message
+   used to press the button has the same number as a property sheet's page removal, so it is
+   never sent to anything else.
+
+The OK button is pressed with `TDM_CLICK_BUTTON`. If that does not close it, `WM_CLOSE` is
+tried, which a task dialog without cancellation ignores. A dialog still open after both is
+reported in the log and left for the user. The process showing the dialog is never signalled
+or ended, and nothing about the dialog changes the exit code.
+
+`--error-dialogs` lists every open dialog mentioning this package with the rule each one
+fails, and closes nothing.

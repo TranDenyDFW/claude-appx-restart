@@ -132,6 +132,19 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | The coverage map checker refuses a renamed test, a missing file and a malformed row | tests/test_acceptance_checker.py::test_a_row_naming_a_test_that_does_not_exist_fails, tests/test_acceptance_checker.py::test_a_row_naming_a_tool_that_does_not_exist_fails, tests/test_acceptance_checker.py::test_a_row_that_is_not_two_columns_is_reported |
 | A task definition survives an export and a restore, which is what a rollback depends on | tests/test_task_roundtrip_windows.py::test_a_registered_task_survives_an_export_and_a_restore, tests/test_task_roundtrip_windows.py::test_an_absent_task_reports_itself_absent (elevated only, runs on CI) |
 
+## Closing the stale activation error dialog
+
+| Review item | Evidence |
+|---|---|
+| The dialog captured from a real incident matches, and each rule failing alone refuses it | tests/test_dialogs.py::test_the_captured_production_dialog_matches, tests/test_dialogs.py::test_an_owner_outside_the_shell_is_refused, tests/test_dialogs.py::test_a_property_sheet_is_refused, tests/test_dialogs.py::test_another_package_is_refused |
+| Nothing is closed unless the launch ends GREEN, and the dialogs are recorded before launch | tests/test_dialogs.py::test_green_closes_the_dialogs_recorded_before_launch, tests/test_dialogs.py::test_visible_without_an_event_check_leaves_them_open, tests/test_dialogs.py::test_red_leaves_them_open |
+| A dialog is closed only when Windows logged the sharing violation it reports | tests/test_dialogs.py::test_no_recent_sharing_violation_leaves_the_dialog_open, tests/test_dialogs.py::test_the_recent_failure_is_read_from_the_event_log |
+| A dialog raised after launch, or a window that changed, is never closed | tests/test_dialogs.py::test_a_dialog_that_appeared_after_launch_is_never_closed, tests/test_dialogs.py::test_a_handle_reused_before_dismissal_is_not_touched |
+| A real task dialog is closed by pressing OK, which WM_CLOSE alone cannot do | tests/test_dialogs_windows.py::test_the_ok_button_is_pressed_and_the_dialog_closes, tests/test_dialogs_windows.py::test_wm_close_alone_does_not_close_a_task_dialog |
+| Dialog handling never raises and never changes the outcome | tests/test_dialogs.py::test_an_error_while_closing_never_escapes, tests/test_dialogs.py::test_a_snapshot_never_raises |
+| The manifest executable is read for the selected application and never guessed | tests/test_package_identity.py::test_the_executable_follows_the_selected_id_not_the_position, tests/test_package_identity.py::test_nothing_is_guessed |
+| The live sihost dialog from the 2026-09-16 incident was closed by the production code | manual: detected by --error-dialogs with every rule passing, then closed by TDM_CLICK_BUTTON on the first step, with sihost.exe still running afterwards |
+
 ## Manual release gate
 
 These need administrator rights, repository administration, or a real incident, so they are performed by hand before v1.0.3 is tagged.

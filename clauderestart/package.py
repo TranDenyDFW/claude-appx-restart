@@ -30,6 +30,9 @@ class PackageInfo:
     application_id: str | None
     user_sid: str
     application_id_error: str = ""
+    # The selected application's Executable from the manifest, relative to install_location,
+    # for example app\Claude.exe. Empty when it could not be read; nothing is inferred from it.
+    application_executable: str = ""
 
     def __post_init__(self) -> None:
         # Exactly one of the two states is legal: a confirmed id, or no id with a reason.
@@ -79,6 +82,28 @@ def select_application_id(ids: object, manifest_error: str) -> tuple[str | None,
     return None, f"the package manifest lists {len(cleaned)} applications: {', '.join(cleaned)}"
 
 
+def executable_for(entries: object, application_id: str | None) -> str:
+    """The manifest Executable of the selected application, or an empty string.
+
+    Nothing is guessed: an unknown application id, a missing entry, or several entries for
+    the same id all give an empty string, and whatever depends on the executable is skipped.
+    """
+    if application_id is None:
+        return ""
+    if isinstance(entries, dict):
+        entries = [entries]
+    if not isinstance(entries, (list, tuple)):
+        return ""
+    found = [
+        str(entry.get("Executable") or "").strip()
+        for entry in entries
+        if isinstance(entry, dict) and str(entry.get("Id") or "").strip() == application_id
+    ]
+    if len(found) != 1:
+        return ""
+    return found[0]
+
+
 def get_claude_package() -> PackageInfo:
     script = r"""
 $result = @(
@@ -87,10 +112,15 @@ $result = @(
     ForEach-Object {
         $package = $_
         $ids = @()
+        $executables = @()
         $manifestError = ''
         try {
             $manifest = Get-AppxPackageManifest -Package $package.PackageFullName -ErrorAction Stop
-            $ids = @(@($manifest.Package.Applications.Application) | ForEach-Object { [string]$_.Id })
+            $applications = @($manifest.Package.Applications.Application)
+            $ids = @($applications | ForEach-Object { [string]$_.Id })
+            $executables = @($applications | ForEach-Object {
+                [pscustomobject]@{ Id = [string]$_.Id; Executable = [string]$_.Executable }
+            })
         } catch {
             $manifestError = [string]$_.Exception.Message
             if (-not $manifestError) { $manifestError = 'Get-AppxPackageManifest failed' }
@@ -102,6 +132,7 @@ $result = @(
             PackageFamilyName = $package.PackageFamilyName
             InstallLocation = $package.InstallLocation
             ApplicationIds = @($ids)
+            ApplicationExecutables = @($executables)
             ManifestError = $manifestError
             UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         }
@@ -131,6 +162,7 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4
         application_id=application_id,
         user_sid=str(item["UserSid"]),
         application_id_error=application_id_error,
+        application_executable=executable_for(item.get("ApplicationExecutables"), application_id),
     )
     if package.name != APP_NAME or package.package_family_name != EXPECTED_PACKAGE_FAMILY:
         raise SafetyStop(

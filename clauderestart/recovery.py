@@ -20,7 +20,7 @@ import subprocess
 import time
 from typing import Iterable, Protocol
 
-from . import events, shell, winapi
+from . import dialogs, events, shell, winapi
 from .errors import RecoveryError, SafetyStop
 from .package import EXPECTED_PACKAGE_FAMILY, PackageInfo, version_key
 from .reporting import Reporter
@@ -673,21 +673,6 @@ def close_job_records(jobs: Iterable[JobRecord]) -> None:
         job.handle = 0
 
 
-def _window_process_path(pid: int) -> str:
-    kernel32 = winapi.kernel32
-    handle = kernel32.OpenProcess(winapi.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return ""
-    try:
-        buffer = ctypes.create_unicode_buffer(32768)
-        size = wintypes.DWORD(len(buffer))
-        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return buffer.value
-        return ""
-    finally:
-        winapi.close_handle(int(handle))
-
-
 def visible_claude_windows(package: PackageInfo) -> list[dict[str, object]]:
     user32 = winapi.user32
     found: list[dict[str, object]] = []
@@ -705,7 +690,7 @@ def visible_claude_windows(package: PackageInfo) -> list[dict[str, object]]:
         user32.GetWindowTextW(hwnd, title_buffer, length + 1)
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        path = _window_process_path(int(pid.value))
+        path = winapi.process_image_path(int(pid.value))
         normalized = os.path.normcase(os.path.normpath(path)) if path else ""
         if normalized.startswith(expected_root):
             found.append({"hwnd": int(hwnd), "pid": int(pid.value), "title": title_buffer.value, "path": path})
@@ -725,6 +710,9 @@ def launch_and_verify(package: PackageInfo, reporter: Reporter, wait_seconds: in
             f"({package.application_id_error})."
         )
     started_at = datetime.now(timezone.utc)
+    # Record the error dialogs a failed click left open before Claude is started, so only a
+    # dialog that already existed can be closed later, never one a new failure raises.
+    before_launch = dialogs.snapshot(package)
     reporter.emit("LAUNCH", f"Starting shell:AppsFolder\\{aumid}")
     # Explorer hands the activation to the running (unelevated) shell and exits, so the
     # packaged app never inherits this process's elevated token.
@@ -773,6 +761,9 @@ def launch_and_verify(package: PackageInfo, reporter: Reporter, wait_seconds: in
             "GREEN",
             f"Visible Claude window verified at PID {window['pid']}; zero new {events.SHARE_VIOLATION_HEX} events.",
         )
+        # Only GREEN proves the failure the dialog reports is resolved. VISIBLE could not check
+        # for new sharing violations, so a dialog stays open after it.
+        dialogs.dismiss_after_green(package, before_launch, reporter)
     else:
         reporter.emit(
             "VISIBLE",

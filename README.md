@@ -41,7 +41,7 @@ The windowed executable is checked before it is installed. The console executabl
 
 The task fires when Windows records this exact startup failure (AppModel-Runtime Event 208 for Claude with error `0x80070020`), runs only while you are signed in, also runs on battery power, and is limited to one instance and five minutes per run. When the failure occurs, the task closes only the verified obsolete Claude Job and opens the installed version of Claude.
 
-The error dialog can still appear briefly, because Windows records the failure before recovery starts.
+The error dialog still appears when you click, because Windows records the failure before recovery starts. Once recovery has proved Claude is running, it closes that dialog for you. It closes only a dialog it can tie to this exact failure: shown by the Windows shell, titled with Claude's own executable, already open before Claude was restarted, and backed by a sharing violation Windows logged in the last ten minutes. Any other error stays on screen. To see what it would close without closing anything, run `.\ClaudeRestart.exe --error-dialogs`.
 
 To upgrade, extract a newer release and run its **Install Automatic Recovery.cmd**. The new version is written into a new folder and fully checked there; only then does the task start pointing at it, and the previous version is removed afterwards. Nothing is ever written over the files the running task uses, so a failure at any point leaves the previous version and the previous task working. If a recovery is running at that moment, the old version cannot be cleaned up yet and the tool says so; run the installer again later to finish tidying up.
 
@@ -70,6 +70,9 @@ Open a terminal in `C:\Program Files\ClaudeRestart\versions\<version>-<id>` (or 
 
 # Look for an obsolete Claude Job without closing anything
 .\ClaudeRestart.exe --scan
+
+# List open Claude error dialogs and whether recovery would close each one
+.\ClaudeRestart.exe --error-dialogs
 
 .\ClaudeRestart.exe --version
 ```

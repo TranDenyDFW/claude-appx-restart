@@ -45,6 +45,17 @@ ERROR_CANCELLED = 1223
 INFINITE = 0xFFFFFFFF
 WAIT_FAILED = 0xFFFFFFFF
 FOLDERID_PROGRAM_FILES = "{905e63b6-c1bf-494e-b29c-65b732d3d21a}"
+FOLDERID_WINDOWS = "{f38bf404-1d43-42f2-9305-67de0b28fc23}"
+
+# Closing the error dialog a failed Claude click leaves open. TDM_CLICK_BUTTON presses a
+# TaskDialog button by its id; the same number is PSM_REMOVEPAGE on a property sheet, so it
+# is only ever sent to a window already proved to be a TaskDialog.
+WM_CLOSE = 0x0010
+WM_USER = 0x0400
+TDM_CLICK_BUTTON = WM_USER + 102
+IDOK = 1
+SMTO_ABORTIFHUNG = 0x0002
+GW_OWNER = 4
 
 # File handles. A file opened with only FILE_SHARE_READ cannot be written, renamed,
 # or deleted by anyone else while the handle is open, which is how bytes that were
@@ -342,6 +353,29 @@ def configure() -> None:
     user32.GetWindowTextW.restype = ctypes.c_int
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.LPARAM]
+    user32.EnumChildWindows.restype = wintypes.BOOL
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.IsWindowEnabled.argtypes = [wintypes.HWND]
+    user32.IsWindowEnabled.restype = wintypes.BOOL
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    # LRESULT and PDWORD_PTR are pointer sized; the default int would truncate on x64.
+    user32.SendMessageTimeoutW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
 
     kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -899,6 +933,21 @@ def file_product_version(path: object) -> str:
         return ""
 
 
+def _known_folder(folder_id: str, label: str) -> Path:
+    folder = GUID.from_string(folder_id)
+    path_pointer = ctypes.c_void_p()
+    result = shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path_pointer))
+    try:
+        if result != 0 or not path_pointer.value:
+            raise RecoveryError(
+                f"SHGetKnownFolderPath({label}) failed with HRESULT 0x{result & 0xFFFFFFFF:08X}."
+            )
+        return Path(ctypes.wstring_at(path_pointer.value))
+    finally:
+        if path_pointer.value:
+            ole32.CoTaskMemFree(path_pointer)
+
+
 def program_files_dir() -> Path:
     """Return the Program Files folder from the Windows shell.
 
@@ -906,15 +955,32 @@ def program_files_dir() -> Path:
     %ProgramFiles% before the elevated relaunch and redirect the install into a folder
     it can write.
     """
-    folder = GUID.from_string(FOLDERID_PROGRAM_FILES)
-    path_pointer = ctypes.c_void_p()
-    result = shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path_pointer))
+    return _known_folder(FOLDERID_PROGRAM_FILES, "ProgramFiles")
+
+
+def windows_dir() -> Path:
+    """Return the Windows folder from the shell, for the same reason: %SystemRoot% can be set."""
+    return _known_folder(FOLDERID_WINDOWS, "Windows")
+
+
+def process_image_path(pid: int) -> str:
+    """The full image path of a process, or an empty string when it cannot be read."""
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
     try:
-        if result != 0 or not path_pointer.value:
-            raise RecoveryError(
-                f"SHGetKnownFolderPath(ProgramFiles) failed with HRESULT 0x{result & 0xFFFFFFFF:08X}."
-            )
-        return Path(ctypes.wstring_at(path_pointer.value))
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buffer))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value
+        return ""
     finally:
-        if path_pointer.value:
-            ole32.CoTaskMemFree(path_pointer)
+        close_handle(int(handle))
+
+
+def process_session(pid: int) -> int | None:
+    """The Windows session a process runs in, or None when it cannot be read."""
+    session = wintypes.DWORD()
+    if not kernel32.ProcessIdToSessionId(pid, ctypes.byref(session)):
+        return None
+    return int(session.value)

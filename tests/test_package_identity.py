@@ -20,7 +20,7 @@ from clauderestart import package as package_module  # noqa: E402
 from clauderestart.errors import RecoveryError, SafetyStop  # noqa: E402
 
 
-def manifest_row(*, ids: object = ("Claude",), error: str = "") -> str:
+def manifest_row(*, ids: object = ("Claude",), error: str = "", executables: object = None) -> str:
     return json.dumps(
         [
             {
@@ -30,6 +30,7 @@ def manifest_row(*, ids: object = ("Claude",), error: str = "") -> str:
                 "PackageFamilyName": package_module.EXPECTED_PACKAGE_FAMILY,
                 "InstallLocation": r"C:\Program Files\WindowsApps\fixture",
                 "ApplicationIds": list(ids) if isinstance(ids, (list, tuple)) else ids,
+                "ApplicationExecutables": executables,
                 "ManifestError": error,
                 "UserSid": "S-1-5-21-1111111111-2222222222-3333333333-1001",
             }
@@ -40,6 +41,43 @@ def manifest_row(*, ids: object = ("Claude",), error: str = "") -> str:
 def query(**kwargs: object) -> package_module.PackageInfo:
     with mock.patch.object(package_module.shell, "run_powershell", return_value=manifest_row(**kwargs)):
         return package_module.get_claude_package()
+
+
+class ExecutableTests(unittest.TestCase):
+    """The executable the error dialog is matched against, read and never guessed."""
+
+    def test_the_selected_application_executable_is_read(self) -> None:
+        package = query(
+            ids=("Claude",), executables=[{"Id": "Claude", "Executable": r"app\Claude.exe"}]
+        )
+        self.assertEqual(package.application_executable, r"app\Claude.exe")
+
+    def test_the_executable_follows_the_selected_id_not_the_position(self) -> None:
+        package = query(
+            ids=("Helper", "Claude"),
+            executables=[
+                {"Id": "Helper", "Executable": r"app\helper.exe"},
+                {"Id": "Claude", "Executable": r"app\Claude.exe"},
+            ],
+        )
+        self.assertEqual(package.application_id, "Claude")
+        self.assertEqual(package.application_executable, r"app\Claude.exe")
+
+    def test_a_single_entry_sent_as_an_object_is_accepted(self) -> None:
+        # PowerShell collapses a one element array to an object in JSON.
+        package = query(ids=("Claude",), executables={"Id": "Claude", "Executable": r"app\Claude.exe"})
+        self.assertEqual(package.application_executable, r"app\Claude.exe")
+
+    def test_nothing_is_guessed(self) -> None:
+        self.assertEqual(query(ids=("Claude",), executables=None).application_executable, "")
+        self.assertEqual(query(ids=(), error="denied").application_executable, "")
+        duplicated = [
+            {"Id": "Claude", "Executable": r"app\a.exe"},
+            {"Id": "Claude", "Executable": r"app\b.exe"},
+        ]
+        self.assertEqual(package_module.executable_for(duplicated, "Claude"), "")
+        self.assertEqual(package_module.executable_for([{"Id": "Other", "Executable": "x.exe"}], "Claude"), "")
+        self.assertEqual(package_module.executable_for([{"Id": "Claude", "Executable": "x.exe"}], None), "")
 
 
 class SelectionRuleTests(unittest.TestCase):
