@@ -31,7 +31,17 @@ jobs:
           python -m pip install -r requirements-build.txt
 
       - name: Unit tests
-        run: python -m unittest discover -s tests -v
+        # The runner is elevated, so every elevation gated control must actually run here.
+        # A plain discovery exits 0 whether they run or skip, which makes a green job
+        # indistinguishable from one where the controls never executed.
+        run: python tools/run_tests.py --forbid-skips
+
+      - name: Every acceptance row names a test that exists
+        run: python tools/check_acceptance.py
+
+      - name: The security tests can fail
+        # Removes each security behaviour in a throwaway copy and requires a red test.
+        run: python tools/mutation_guard.py
 
       - name: Self-check from source
         run: python claude_restart.py --self-check
