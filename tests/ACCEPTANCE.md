@@ -10,7 +10,9 @@ test on this machine can provide; they are listed in the plan's manual gate.
 
 | Review item | Evidence |
 |---|---|
-| Arbitrary bytes in place of the twin stop the install, nothing changes, the error is logged | tests/test_twin.py::test_arbitrary_bytes_are_refused |
+| Arbitrary bytes in place of the twin stop the install, nothing changes, the error is logged | tests/test_twin.py::test_arbitrary_bytes_are_refused, tests/test_twin.py::test_a_tampered_twin_exits_with_the_safety_stop_code |
+| A tampered twin of the same length is refused by the digest alone | tests/test_twin.py::test_a_same_length_tampered_twin_is_refused_by_the_digest_alone |
+| A missing or unauthenticated twin exits 2, never as an internal error | tests/test_twin.py::test_a_missing_twin_exits_with_the_safety_stop_code, tests/test_twin.py::test_a_build_without_a_record_exits_with_the_safety_stop_code, tests/test_twin.py::test_the_install_path_never_reports_an_internal_error |
 | A valid executable from another release is refused on the embedded digest | tests/test_twin.py::test_a_twin_from_another_release_is_refused |
 | A size mismatch with a matching digest is refused | tests/test_twin.py::test_size_mismatch_with_a_matching_digest_is_refused |
 | A build with no embedded record refuses to install | tests/test_twin.py::test_a_build_without_an_embedded_record_refuses |
@@ -20,7 +22,7 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | The checksum file beside the build is never consulted | tests/test_twin.py::test_the_checksums_file_beside_the_build_is_never_consulted |
 | Only the first candidate name is opened; no fall-through to a second file | tests/test_twin.py::test_no_fall_through_when_the_canonical_twin_fails |
 | The digest is embedded by a two-stage build that cannot ship a stale record | tests/test_build.py::test_stages_run_in_order_with_the_record_written_between_them, tests/test_build.py::test_the_stage_guard_refuses_every_wrong_combination |
-| An existing install and its task are untouched when the twin fails | tests/test_twin.py::test_matching_twin_is_authenticated_and_held_open, tests/test_install_transaction.py::test_an_export_failure_stops_before_anything_is_staged |
+| An existing install and its task are untouched when the twin fails | tests/test_install_transaction.py::test_a_twin_failure_leaves_an_existing_install_and_its_task_untouched |
 | Code signing | manual: no signing identity exists; Authenticode is recorded as NotSigned by tools/verify_release.py |
 
 ## P1 Establish and verify the Program Files trust boundary
@@ -35,7 +37,7 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | A folder that cannot be protected leaves nothing behind | tests/test_install_trust.py::test_a_failed_permission_apply_leaves_no_folder_behind |
 | The permission list is judged exactly, including deny and unsupported entry types | tests/test_security.py::test_a_deny_entry_is_blocking, tests/test_security.py::test_a_conditional_entry_is_blocking_because_it_is_not_interpreted, tests/test_security.py::test_every_single_write_bit_is_caught_for_an_untrusted_principal |
 | A standard user cannot overwrite, rename or delete the installed executable | tests/test_security_windows.py::test_a_standard_user_is_denied_write_rename_and_delete, tests/test_security_windows.py::test_with_the_canonical_owner_even_permission_changes_are_denied (elevated only), and the check is proven able to fail by tests/test_security_windows.py::test_the_denial_check_can_fail |
-| Status reports the verified canonical task executable and the permission result | tests/test_install_trust.py::test_a_fresh_root_is_created_protected_and_verified, manual gate item 2 |
+| Status reports the verified canonical task executable and the permission result | tests/test_install_transaction.py::test_status_reports_each_version_and_notices_a_changed_file, tests/test_install_transaction.py::test_status_says_so_when_nothing_is_installed, tests/test_task_xml.py::test_a_task_running_another_executable_is_rejected |
 
 ## P1 Close the Job-membership validation race
 
@@ -73,7 +75,7 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | A registration failure restores the previous task action | tests/test_install_transaction.py::test_a_registration_failure_restores_the_previous_task_definition, tests/test_install_transaction.py::test_a_registration_failure_with_no_previous_task_removes_the_new_one |
 | A post-registration verification failure restores the previous task action | tests/test_install_transaction.py::test_a_task_that_verifies_wrong_is_rolled_back |
 | A version that fails its post-commit check never becomes the task's target | tests/test_install_transaction.py::test_a_version_that_fails_its_final_check_is_set_aside_and_no_task_is_registered |
-| An upgrade while recovery is running reports a retry without a mixed installation | tests/test_install_transaction.py::test_a_second_install_moves_the_task_and_removes_the_old_version, tests/test_remove.py::test_the_folder_this_program_runs_from_is_left_in_place |
+| An upgrade while recovery is running reports a retry without a mixed installation | tests/test_install_transaction.py::test_the_running_version_is_left_in_place_with_a_retry, tests/test_remove.py::test_the_folder_this_program_runs_from_is_left_in_place |
 | A successful upgrade leaves one verified task action and one immutable version folder | tests/test_install_transaction.py::test_a_clean_install_produces_one_verified_version_and_one_task |
 | Upgrading from the currently registered source-based task | tests/test_install_transaction.py::test_an_upgrade_from_a_source_task_registers_the_versioned_executable, tests/test_install_transaction.py::test_a_forced_failure_restores_the_exact_source_task_definition, manual gate item 3 |
 | The executable a live task refers to is never overwritten | tests/test_install_transaction.py::test_an_older_installer_refuses_to_replace_a_newer_version, tests/test_install_transaction.py::test_an_upgrade_from_the_flat_layout_removes_the_old_files |
@@ -109,7 +111,7 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | Modified installed files are reported and preserved unless forced | tests/test_remove.py::test_a_changed_file_is_kept_and_reported, tests/test_remove.py::test_a_changed_file_is_removed_only_when_forced |
 | Path traversal and reparse-point entries are rejected | tests/test_remove.py::test_an_entry_pointing_outside_the_folder_is_refused, tests/test_remove.py::test_a_junction_in_the_tree_stops_the_removal |
 | A clean installation uninstalls completely | tests/test_remove.py::test_a_clean_installation_is_removed_completely, tests/test_remove.py::test_the_legacy_flat_layout_is_removed_too |
-| Logs are a documented cleanup choice, removed with their version folder | tests/test_remove.py::test_a_clean_installation_is_removed_completely |
+| Logs are a documented cleanup choice, removed with their version folder | tests/test_install_transaction.py::test_a_log_beside_a_version_goes_with_that_version |
 
 ## Non-blocking cleanup
 
@@ -118,3 +120,21 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | The payload is defined once and imported by the build and the application | tests/test_build.py::test_the_manifest_lists_every_release_asset_with_its_digest, tests/test_imports.py::test_every_module_follows_the_import_rules |
 | Install, elevation and task duties live outside the recovery module | tests/test_imports.py::test_every_module_follows_the_import_rules, tests/test_imports.py::test_the_scan_reports_known_bad_sources |
 | Destructive Windows operations sit behind interfaces so failures can be injected | tests/test_recovery_race.py::test_a_job_that_cannot_be_frozen_is_never_terminated, tests/test_install_transaction.py::test_a_failed_rename_reports_a_retry_and_changes_nothing |
+| A limit left behind by a killed run is reported and put back | tests/test_recovery_race.py::test_a_limit_left_by_a_killed_run_is_reported, tests/test_recovery_race.py::test_a_job_with_no_previous_limit_is_not_reported |
+| Every security behaviour has a test that fails when it is removed | manual: enforced on every run by tools/mutation_guard.py, which the workflow runs and which fails when a behaviour can be deleted with the tests still green |
+| A control that skips cannot pass for a control that ran | manual: enforced by tools/run_tests.py --forbid-skips, which the elevated workflow runs |
+
+## Manual release gate
+
+These need administrator rights, repository administration, or a real incident, so they are performed by hand before v1.0.3 is tagged.
+
+| Gate item | Evidence |
+|---|---|
+| 1. Immutable releases are enabled for the repository | manual: `gh api repos/TranDenyDFW/claude-appx-restart/immutable-releases` reports enabled, then tools/release_preflight.py passes |
+| 2. The freeze is available on a real Claude Job | manual: `ClaudeRestart.exe --scan` reports FREEZE CURRENT available |
+| 3. An upgrade from the registered source task | manual: install from the built artifact over the existing source task, then `--automation-status` |
+| 4. A standard user cannot overwrite, rename or delete the installed executable | manual: attempt each from a non-elevated prompt and confirm every one is denied |
+| 5. Tamper tests on the extracted folder | manual: arbitrary bytes, another release's twin, and a replace after open, each a safety stop with the exported task identical before and after |
+| 6. A controlled recovery of a real historical failure | manual: `--trace`, then a repair showing REVALIDATED, FREEZE, CLOSED and GREEN |
+| 7. A clean Windows 11 installation | manual: install on a fresh virtual machine |
+| 8. Published assets match the immutable digests | manual: tools/verify_release.py against a fresh download, recording Authenticode status and a Defender scan per asset |

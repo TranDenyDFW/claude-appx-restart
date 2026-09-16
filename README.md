@@ -27,7 +27,7 @@ The ZIP contains:
 | `Remove Automatic Recovery.cmd` | Removes the scheduled task and the files the installer placed in `C:\Program Files\ClaudeRestart` (one UAC prompt). |
 | `ClaudeRestart-launch.cmd` | Shared dispatcher the three launchers call: runs the exe beside it, or the Python source. |
 
-The executables are not code-signed, so Windows SmartScreen may show **Windows protected your PC** the first time. Choose **More info** and then **Run anyway**, or right-click the file, open **Properties**, and tick **Unblock**. `SHA256SUMS.txt` on the release page lists the checksums of every file, for you to check the download; the installer never reads it, because a file sitting beside the executables can be replaced along with them.
+The executables are not code-signed, so Windows SmartScreen may show **Windows protected your PC** the first time. Choose **More info** and then **Run anyway**, or right-click the file, open **Properties**, and tick **Unblock**. `SHA256SUMS.txt` on the release page lists the checksums of the two executables and the ZIP, for you to check the download; the files inside the ZIP are covered by the ZIP's own checksum; the installer never reads it, because a file sitting beside the executables can be replaced along with them.
 
 ## Install automatic recovery
 
@@ -92,7 +92,7 @@ py -3 .\claude_restart.py --trace --minutes 180
 py -3 .\claude_restart.py --install-automation
 ```
 
-The three `.cmd` launchers call `ClaudeRestart-launch.cmd`, which runs `ClaudeRestart.exe` when it is next to them and falls back to `py -3` or `python.exe` otherwise. Their exit code is the elevated run's real result, because the tool waits for the administrator process it starts. When installed from source, the scheduled task runs `pythonw.exe` so it has no console window. A source install copies nothing into Program Files: the task runs the interpreter and script from where they are, so prefer the release executables unless both live in folders only administrators can change.
+The three `.cmd` launchers call `ClaudeRestart-launch.cmd`, which runs `ClaudeRestart.exe` when it is next to them and falls back to `py -3` or `python.exe` otherwise. Their exit code is the elevated run's real result, because the tool waits for the administrator process it starts. When installed from source, the scheduled task runs `pythonw.exe` when that sits beside the interpreter, so a recovery shows no console window; with an interpreter that ships without it, the task runs `python.exe` and a console window does appear. A source install copies nothing into Program Files: the task runs the interpreter and script from where they are, so prefer the release executables unless both live in folders only administrators can change.
 
 ## What the tool can close
 

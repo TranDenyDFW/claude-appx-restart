@@ -580,6 +580,14 @@ def repair_stale_job(
         ) from exc
 
     saved = inspector.query_limits(freeze_handle)
+    previous = winapi.JOBOBJECT_EXTENDED_LIMIT_INFORMATION.from_buffer_copy(saved)
+    if previous.BasicLimitInformation.LimitFlags & winapi.JOB_OBJECT_LIMIT_ACTIVE_PROCESS:
+        reporter.emit(
+            "NOTE",
+            f"{job.name} already carries an active process limit of "
+            f"{int(previous.BasicLimitInformation.ActiveProcessLimit)}, which an earlier run was killed "
+            "before it could restore. It is replaced now and put back afterwards.",
+        )
     applied = False
     try:
         for attempt in range(1, attempts + 1):

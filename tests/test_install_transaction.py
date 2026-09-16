@@ -66,6 +66,9 @@ class TransactionTests(unittest.TestCase):
         self.root.parent.mkdir(parents=True)
         self.reporter = reporting.Reporter()
         self.security = support.FakeFileSecurity()
+        # Every authenticated twin holds the file open. A test that tampers with the twin
+        # must release them first, because that lock denies exactly this.
+        self.twin_locks: list[winapi.LockedFile] = []
 
         self.frozen = support.frozen_at(self.console_path)
         self.frozen.__enter__()
@@ -79,6 +82,7 @@ class TransactionTests(unittest.TestCase):
     def authenticated(self) -> twin_module.AuthenticatedTwin:
         locked = winapi.open_locked(self.quiet_path)
         self.addCleanup(locked.close)
+        self.twin_locks.append(locked)
         return twin_module.AuthenticatedTwin(
             locked=locked,
             path=self.quiet_path,
@@ -136,6 +140,81 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(
             task_module.task_command_path(status["Execute"]), second / payload.QUIET_EXE_NAME
         )
+
+    def test_a_twin_failure_leaves_an_existing_install_and_its_task_untouched(self) -> None:
+        """The review's own acceptance case: a bad twin over a working installation."""
+        from clauderestart import cli
+
+        first = self.seed_previous_version()
+        before_tree = support.tree_hash(first)
+        registered_before = len(self.tasks.registered)
+        # The install held the twin open, and that lock denies a write, so release it first.
+        for lock in self.twin_locks:
+            lock.close()
+        # Same length as the good twin, so only the digest comparison can refuse it.
+        self.quiet_path.write_bytes(bytes(len(QUIET_BYTES)))
+        record = twin_module.EmbeddedTwin(
+            name=payload.QUIET_EXE_NAME,
+            sha256=hashlib.sha256(QUIET_BYTES).hexdigest(),
+            size=len(QUIET_BYTES),
+            version=VERSION,
+        )
+        with mock.patch.object(twin_module, "load_embedded_twin", return_value=record), mock.patch.object(
+            cli, "get_claude_package", return_value=package()
+        ), mock.patch.object(install, "install_versioned") as installer, mock.patch.object(
+            cli.task, "register_task_xml"
+        ) as register, mock.patch.object(cli.task, "delete_task") as delete:
+            with self.assertRaises(SafetyStop) as stop:
+                cli.install_auto_recovery(self.reporter)
+        self.assertIn("is not the windowed twin this build was made with", str(stop.exception))
+        installer.assert_not_called()
+        register.assert_not_called()
+        delete.assert_not_called()
+        self.assertEqual(support.tree_hash(first), before_tree)
+        self.assertEqual(len(self.tasks.registered), registered_before)
+
+    def test_the_running_version_is_left_in_place_with_a_retry(self) -> None:
+        first = self.seed_previous_version()
+        # Pretend this process is running out of the previous version folder, which is what
+        # happens when a recovery is under way while the installer runs.
+        with mock.patch.object(install, "app_entry", return_value=first / payload.CONSOLE_EXE_NAME):
+            second = self.install()
+        self.assertTrue(first.is_dir(), "the version running now must survive the cleanup")
+        self.assertTrue(second.is_dir())
+        retries = [line for line in self.reporter.lines if line.startswith("[RETRY]")]
+        self.assertEqual(len(retries), 1, self.reporter.lines)
+        self.assertIn(first.name, retries[0])
+
+    def test_a_log_beside_a_version_goes_with_that_version(self) -> None:
+        first = self.seed_previous_version()
+        (first / payload.LOG_FILE_NAME).write_text("[OK] a previous run\n", encoding="utf-8")
+        self.install()
+        self.assertFalse(first.exists(), "the folder and the log it holds are both removed")
+
+    def test_status_reports_each_version_and_notices_a_changed_file(self) -> None:
+        folder = self.seed_previous_version()
+        reporter = reporting.Reporter()
+        install.installed_state(reporter, self.root)
+        versions = [line for line in reporter.lines if line.startswith("[VERSION]")]
+        self.assertEqual(len(versions), 1, reporter.lines)
+        self.assertIn(folder.name, versions[0])
+        self.assertIn("verified", versions[0])
+
+        # Replace an installed file with different bytes of the same length, which only the
+        # digest comparison can notice.
+        installed = folder / payload.QUIET_EXE_NAME
+        installed.write_bytes(bytes(len(QUIET_BYTES)))
+        reporter = reporting.Reporter()
+        install.installed_state(reporter, self.root)
+        versions = [line for line in reporter.lines if line.startswith("[VERSION]")]
+        self.assertEqual(len(versions), 1, reporter.lines)
+        self.assertIn("does not match what was installed", versions[0])
+
+    def test_status_says_so_when_nothing_is_installed(self) -> None:
+        reporter = reporting.Reporter()
+        install.installed_state(reporter, self.root / "absent")
+        self.assertEqual(len(reporter.lines), 1, reporter.lines)
+        self.assertIn("not installed", reporter.lines[0])
 
     def test_a_failure_while_staging_leaves_the_previous_install_untouched(self) -> None:
         first = self.seed_previous_version()

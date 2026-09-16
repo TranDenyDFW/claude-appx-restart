@@ -49,6 +49,37 @@ class FailingInspector(FakeJobInspector):
         return super().pids(job)
 
 
+class LeakedLimitTests(unittest.TestCase):
+    """A run killed while the freeze was applied leaves its limit on the obsolete Job.
+
+    The documentation promises the next run reports that and replaces it. Only the scan path
+    reported it, so the promise was false for every repair.
+    """
+
+    def repair(self, inspector) -> int:
+        self.reporter = reporting.Reporter()
+        return recovery.repair_stale_job(make_job(), APPINFO_PID, self.reporter, inspector, 3)
+
+    def notes(self) -> list[str]:
+        return [line for line in self.reporter.lines if "already carries an active process limit" in line]
+
+    def test_a_limit_left_by_a_killed_run_is_reported(self) -> None:
+        limits = winapi.JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        limits.BasicLimitInformation.LimitFlags = winapi.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        limits.BasicLimitInformation.ActiveProcessLimit = 7
+        inspector = FakeJobInspector([[101, 102]], saved_limits=bytes(limits))
+        self.repair(inspector)
+        self.assertEqual(len(self.notes()), 1, self.reporter.lines)
+        self.assertIn("7", self.notes()[0])
+        # The limit that was there is still put back, rather than left as this run set it.
+        self.assertEqual(len(inspector.restore_calls), 1)
+        self.assertEqual(inspector.restore_calls[0], bytes(limits))
+
+    def test_a_job_with_no_previous_limit_is_not_reported(self) -> None:
+        self.repair(FakeJobInspector([[101, 102]]))
+        self.assertEqual(self.notes(), [])
+
+
 class GrowthTests(unittest.TestCase):
     def repair(self, inspector, job=None, attempts=3):
         return recovery.repair_stale_job(job or make_job(), APPINFO_PID, reporting.Reporter(), inspector, attempts)
