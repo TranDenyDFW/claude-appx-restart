@@ -130,6 +130,21 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         '        raise SafetyStop(f"The installed windowed executable in {final} is not the authenticated one.")',
         INSTALL_TESTS,
     ),
+    (
+        "requiring a trusted owner on an installer owned folder",
+        "clauderestart/security.py",
+        # The leading newline keeps this from also matching verify_child's deeper indented copy.
+        "\n    if info.owner not in TRUSTED_OWNERS:",
+        "\n    if False:",
+        ("tests.test_security",),
+    ),
+    (
+        "requiring the permission list to be protected from inheritance",
+        "clauderestart/security.py",
+        "    elif not inherited and not info.control & winapi.SE_DACL_PROTECTED:",
+        "    elif False:",
+        ("tests.test_security",),
+    ),
 ]
 
 

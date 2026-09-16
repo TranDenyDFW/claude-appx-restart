@@ -140,6 +140,32 @@ class FileSecurity(Protocol):
     def apply_owned_dir(self, locked: winapi.LockedFile) -> None: ...
 
 
+def _judge_owned(info, *, inherited: bool) -> AclReport:
+    """Judge one security descriptor of an installer owned folder.
+
+    Both the production check, which reads a real handle, and verify_sddl, which reads a
+    string, come through here. They were once two copies of these rules, and only the copy
+    the tests ran was ever exercised without elevation, so the two could drift apart with
+    nothing noticing.
+    """
+    problems: list[str] = []
+    blocking: list[str] = []
+    if info.owner not in TRUSTED_OWNERS:
+        message = f"the folder is owned by {info.owner or 'an unreadable SID'}"
+        problems.append(message)
+        blocking.append(message)
+    if not info.control & winapi.SE_DACL_PRESENT:
+        message = "the folder has no permission list"
+        problems.append(message)
+        blocking.append(message)
+    elif not inherited and not info.control & winapi.SE_DACL_PROTECTED:
+        problems.append("the permission list still inherits from Program Files")
+    ace_problems, ace_blocking = _ace_problems(info.aces, inherited=inherited)
+    problems.extend(ace_problems)
+    blocking.extend(ace_blocking)
+    return AclReport(not problems, info.owner, problems, blocking)
+
+
 class WindowsFileSecurity:
     """Reads and writes real Windows security, always through an open handle."""
 
@@ -148,23 +174,7 @@ class WindowsFileSecurity:
 
     def verify_owned_dir(self, locked: winapi.LockedFile) -> AclReport:
         """A folder this installer creates: explicit canonical ACEs, protected, trusted owner."""
-        info = winapi.read_security(locked.handle)
-        problems: list[str] = []
-        blocking: list[str] = []
-        if info.owner not in TRUSTED_OWNERS:
-            message = f"the folder is owned by {info.owner or 'an unreadable SID'}"
-            problems.append(message)
-            blocking.append(message)
-        if not info.control & winapi.SE_DACL_PRESENT:
-            message = "the folder has no permission list"
-            problems.append(message)
-            blocking.append(message)
-        if not info.control & winapi.SE_DACL_PROTECTED:
-            problems.append("the permission list still inherits from Program Files")
-        ace_problems, ace_blocking = _ace_problems(info.aces, inherited=False)
-        problems.extend(ace_problems)
-        blocking.extend(ace_blocking)
-        return AclReport(not problems, info.owner, problems, blocking)
+        return _judge_owned(winapi.read_security(locked.handle), inherited=False)
 
     def verify_child(self, locked: winapi.LockedFile) -> AclReport:
         """A file or folder inside a protected folder: everything inherited, nothing added."""
@@ -218,24 +228,12 @@ def open_for_repair(path: Path, *, directory: bool = True, owner: bool = True) -
 
 
 def verify_sddl(sddl: str, *, inherited: bool = False) -> AclReport:
-    """Judge an SDDL string with the same rules used on a real folder (used by tests)."""
-    info = winapi.read_sddl_security(sddl)
-    problems: list[str] = []
-    blocking: list[str] = []
-    if info.owner not in TRUSTED_OWNERS:
-        message = f"the folder is owned by {info.owner or 'an unreadable SID'}"
-        problems.append(message)
-        blocking.append(message)
-    if not info.control & winapi.SE_DACL_PRESENT:
-        message = "the folder has no permission list"
-        problems.append(message)
-        blocking.append(message)
-    elif not inherited and not info.control & winapi.SE_DACL_PROTECTED:
-        problems.append("the permission list still inherits from Program Files")
-    ace_problems, ace_blocking = _ace_problems(info.aces, inherited=inherited)
-    problems.extend(ace_problems)
-    blocking.extend(ace_blocking)
-    return AclReport(not problems, info.owner, problems, blocking)
+    """Judge an SDDL string with the very rules used on a real folder.
+
+    This is the same function the production check calls, reached through a string instead
+    of a handle, so the tests that drive it exercise the shipped logic rather than a copy.
+    """
+    return _judge_owned(winapi.read_sddl_security(sddl), inherited=inherited)
 
 
 def scan_tree(root: Path, security: FileSecurity | None = None) -> list[str]:
