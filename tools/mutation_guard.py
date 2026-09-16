@@ -4,7 +4,7 @@
 A test suite that stays green when the behaviour it claims to protect is deleted proves
 nothing. Every entry below is a behaviour this project's security claims rest on, and every
 one of them once survived deletion with the whole suite green. Each is applied to a throwaway
-copy of the tree; the named test file must turn red.
+copy of the tree; the named test files must turn red.
 
 A mutation whose text no longer matches is reported and fails the run. That is deliberate:
 after a refactor the guard must be updated rather than silently passing on a mutation it can
@@ -25,14 +25,16 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 IGNORE = shutil.ignore_patterns(".git", "tmp", "dist", "build", ".venv-build", "__pycache__", ".md")
 
-# (label, file, exact text to remove or weaken, replacement, the test file that must turn red)
-MUTATIONS = [
+INSTALL_TESTS = ("tests.test_install_transaction", "tests.test_remove")
+
+# (label, file, exact text to remove or weaken, replacement, test modules that must turn red)
+MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
     (
         "the twin digest comparison",
         "clauderestart/twin.py",
         "if observed != record.sha256 or size != record.size:",
         "if size != record.size:",
-        "tests.test_twin",
+        ("tests.test_twin",),
     ),
     (
         "the membership growth guard during validation",
@@ -44,14 +46,14 @@ MUTATIONS = [
             "checked, so they were never verified."
         )""",
         "    added = recheck - snapshot",
-        "tests.test_recovery_race",
+        ("tests.test_recovery_race",),
     ),
     (
         "the Path import the frozen install path needs",
         "clauderestart/cli.py",
         "import os\nfrom pathlib import Path\nimport subprocess",
         "import os\nimport subprocess",
-        "tests.test_twin",
+        ("tests.test_twin",),
     ),
     (
         "the check that the registered task runs the installed executable",
@@ -61,14 +63,14 @@ MUTATIONS = [
         problems.append(f"the task runs {registered}, expected {executable}")
     return problems""",
         "    return problems",
-        "tests.test_task_xml",
+        ("tests.test_task_xml",),
     ),
     (
         "the build stage guard digest comparison",
         "build.py",
         "    if digest != record.sha256 or size != record.size:",
         "    if size != record.size:",
-        "tests.test_build",
+        ("tests.test_build",),
     ),
     (
         "the build stage guard refusing an absent twin",
@@ -79,14 +81,61 @@ MUTATIONS = [
             "record cannot be trusted. Run: py -3 build.py"
         )""",
         "    if not built.is_file():\n        return record",
-        "tests.test_build",
+        ("tests.test_build",),
+    ),
+    (
+        "the manifest comparing the digest of an installed file",
+        "clauderestart/install.py",
+        '            if observed != digest or observed_size != size:\n'
+        '                problems.append(f"{relative} does not match what was installed")',
+        '            if observed_size != size:\n'
+        '                problems.append(f"{relative} does not match what was installed")',
+        INSTALL_TESTS,
+    ),
+    (
+        "refusing a staged file that is not part of the release",
+        "clauderestart/install.py",
+        '        if relative not in recorded:\n'
+        '            raise SafetyStop(f"{path} appeared in the staged files but is not part of this release.")',
+        '        if False:\n'
+        '            raise SafetyStop(f"{path} appeared in the staged files but is not part of this release.")',
+        INSTALL_TESTS,
+    ),
+    (
+        "tying the staged twin to the authenticated record",
+        "clauderestart/install.py",
+        '            if relative == payload.QUIET_EXE_NAME and digest != twin_sha:\n'
+        '                raise SafetyStop("The staged windowed executable is not the one this build was made with.")',
+        '            if False:\n'
+        '                raise SafetyStop("The staged windowed executable is not the one this build was made with.")',
+        INSTALL_TESTS,
+    ),
+    (
+        "acting on the committed manifest verdict",
+        "clauderestart/install.py",
+        '    problems = manifest.verify(final)\n'
+        '    if problems:\n'
+        '        raise SafetyStop(f"The installed files in {final} did not verify: " + "; ".join(problems))',
+        '    problems = manifest.verify(final)\n'
+        '    if False:\n'
+        '        raise SafetyStop(f"The installed files in {final} did not verify: " + "; ".join(problems))',
+        INSTALL_TESTS,
+    ),
+    (
+        "rehashing the committed twin against the record",
+        "clauderestart/install.py",
+        '    if digest.hexdigest() != twin_sha:\n'
+        '        raise SafetyStop(f"The installed windowed executable in {final} is not the authenticated one.")',
+        '    if False:\n'
+        '        raise SafetyStop(f"The installed windowed executable in {final} is not the authenticated one.")',
+        INSTALL_TESTS,
     ),
 ]
 
 
-def run(subject: Path, module: str) -> subprocess.CompletedProcess[str]:
+def run(subject: Path, modules: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-m", "unittest", module],
+        [sys.executable, "-m", "unittest", *modules],
         cwd=str(subject),
         capture_output=True,
         text=True,
@@ -95,7 +144,7 @@ def run(subject: Path, module: str) -> subprocess.CompletedProcess[str]:
 
 def main() -> int:
     survivors: list[str] = []
-    for label, relative, old, new, module in MUTATIONS:
+    for label, relative, old, new, modules in MUTATIONS:
         with tempfile.TemporaryDirectory() as work:
             subject = Path(work) / "subject"
             shutil.copytree(ROOT, subject, ignore=IGNORE)
@@ -107,20 +156,20 @@ def main() -> int:
                 survivors.append(label)
                 continue
 
-            baseline = run(subject, module)
+            baseline = run(subject, modules)
             if baseline.returncode != 0:
-                print(f"BROKEN   {label}: {module} already fails unmutated, so the result means nothing")
+                print(f"BROKEN   {label}: the tests already fail unmutated, so the result means nothing")
                 survivors.append(label)
                 continue
 
             target.write_text(text.replace(old, new), encoding="utf-8")
-            mutated = run(subject, module)
+            mutated = run(subject, modules)
             if mutated.returncode == 0:
-                print(f"SURVIVED {label}: {module} stayed green with the behaviour removed")
+                print(f"SURVIVED {label}: the tests stayed green with the behaviour removed")
                 survivors.append(label)
             else:
                 summary = [line for line in mutated.stderr.splitlines() if line.strip()][-1]
-                print(f"CAUGHT   {label}: {module} turned red ({summary})")
+                print(f"CAUGHT   {label} ({summary})")
 
     caught = len(MUTATIONS) - len(survivors)
     print(f"\n{caught}/{len(MUTATIONS)} mutation(s) caught")

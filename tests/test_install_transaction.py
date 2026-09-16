@@ -299,5 +299,96 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(keep.is_file(), "files the installer never placed are kept")
 
 
+@unittest.skipUnless(sys.platform == "win32", "these verifications read through file handles")
+class StagedAndCommittedVerificationTests(unittest.TestCase):
+    """The staged and committed checks must be able to refuse.
+
+    Every behaviour below could be deleted with the whole suite green, because no test ever
+    put a staged or committed folder into the state the check exists to catch. The install
+    tests only ever exercise the path where everything is already correct.
+    """
+
+    def setUp(self) -> None:
+        winapi.configure()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name).resolve() / f"{VERSION}-abcdef12"
+        self.folder.mkdir(parents=True)
+        self.quiet = self.folder / payload.QUIET_EXE_NAME
+        self.quiet.write_bytes(QUIET_BYTES)
+        self.twin_sha = hashlib.sha256(QUIET_BYTES).hexdigest()
+        self.security = support.FakeFileSecurity()
+
+    def manifest(self) -> install.InstallManifest:
+        digest, size = install.file_digest(self.quiet)
+        return install.InstallManifest(
+            VERSION,
+            "abcdef12",
+            {payload.QUIET_EXE_NAME: {"sha256": digest, "size": size}},
+            {"sha256": self.twin_sha, "size": size, "version": VERSION},
+        )
+
+    def verify_staged(self, manifest: install.InstallManifest | None = None, twin_sha: str | None = None) -> None:
+        install._verify_staged(
+            self.folder, manifest or self.manifest(), self.security, twin_sha or self.twin_sha
+        )
+
+    def verify_committed(self, manifest: install.InstallManifest | None = None, twin_sha: str | None = None) -> None:
+        locked = winapi.open_locked(self.quiet)
+        try:
+            install._verify_committed(
+                self.folder, locked, manifest or self.manifest(), self.security, twin_sha or self.twin_sha
+            )
+        finally:
+            locked.close()
+
+    def test_a_correct_staged_folder_passes(self) -> None:
+        self.verify_staged()
+
+    def test_a_correct_committed_folder_passes(self) -> None:
+        self.verify_committed()
+
+    def test_a_file_that_is_not_part_of_the_release_stops_the_install(self) -> None:
+        (self.folder / "extra.dll").write_bytes(b"planted beside the staged payload")
+        with self.assertRaises(SafetyStop) as stop:
+            self.verify_staged()
+        self.assertIn("not part of this release", str(stop.exception))
+
+    def test_a_staged_twin_that_is_not_the_authenticated_one_stops_the_install(self) -> None:
+        with self.assertRaises(SafetyStop) as stop:
+            self.verify_staged(twin_sha="0" * 64)
+        self.assertIn("not the one this build was made with", str(stop.exception))
+
+    def test_a_committed_twin_that_is_not_the_authenticated_one_is_refused(self) -> None:
+        with self.assertRaises(SafetyStop) as stop:
+            self.verify_committed(twin_sha="0" * 64)
+        self.assertIn("not the authenticated one", str(stop.exception))
+
+    def test_a_committed_file_whose_contents_changed_is_refused(self) -> None:
+        # Same length as the original, so only the digest comparison can catch it.
+        manifest = self.manifest()
+        extra = self.folder / "README.md"
+        extra.write_text("original\n", encoding="utf-8")
+        digest, size = install.file_digest(extra)
+        manifest.files["README.md"] = {"sha256": digest, "size": size}
+        extra.write_text("modified\n", encoding="utf-8")
+        self.assertEqual(size, extra.stat().st_size)
+        with self.assertRaises(SafetyStop) as stop:
+            self.verify_committed(manifest)
+        self.assertIn("did not verify", str(stop.exception))
+
+    def test_the_manifest_reports_a_change_of_the_same_length(self) -> None:
+        # Without this the size comparison decides every case and the digest half is dead
+        # weight: an installed file can be replaced byte for byte and still verify.
+        manifest = self.manifest()
+        self.assertEqual(manifest.verify(self.folder), [])
+        same_length = bytes(len(QUIET_BYTES))
+        self.assertNotEqual(same_length, QUIET_BYTES)
+        self.quiet.write_bytes(same_length)
+        problems = manifest.verify(self.folder)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("does not match what was installed", problems[0])
+
+
 if __name__ == "__main__":
     unittest.main()
