@@ -95,8 +95,8 @@ def task_launcher() -> tuple[Path, str]:
     return executable, f"{prefix} {TASK_ARGUMENTS}".strip()
 
 
-def automation_task_status() -> dict[str, object]:
-    task_name = shell.ps_single_quote(AUTO_RECOVERY_TASK_NAME)
+def automation_task_status(name: str = AUTO_RECOVERY_TASK_NAME) -> dict[str, object]:
+    task_name = shell.ps_single_quote(name)
     script = f"""
 $task = Get-ScheduledTask -TaskName {task_name} -ErrorAction SilentlyContinue
 if (-not $task) {{
@@ -128,7 +128,13 @@ $action = @($task.Actions)[0]
     return dict(json.loads(raw))
 
 
-def build_task_xml(executable: Path, arguments: str, user_sid: str, working_directory: Path) -> str:
+def build_task_xml(
+    executable: Path,
+    arguments: str,
+    user_sid: str,
+    working_directory: Path,
+    task_name: str = AUTO_RECOVERY_TASK_NAME,
+) -> str:
     """Return the Task Scheduler XML for the event-triggered recovery task.
 
     The shape mirrors what Windows itself exports for ONEVENT tasks; the settings
@@ -157,7 +163,7 @@ def build_task_xml(executable: Path, arguments: str, user_sid: str, working_dire
         f"Claude AppX Auto-Recovery {__version__}: repairs the stale Container_Claude Job "
         f"after Event 208 / {events.SHARE_VIOLATION_HEX} and starts Claude.",
     )
-    child(info, "URI", f"\\{AUTO_RECOVERY_TASK_NAME}")
+    child(info, "URI", f"\\{task_name}")
     trigger = child(child(task, "Triggers"), "EventTrigger")
     child(trigger, "Enabled", "true")
     child(trigger, "Subscription", subscription)  # ElementTree escapes the embedded XML.
@@ -175,7 +181,7 @@ def build_task_xml(executable: Path, arguments: str, user_sid: str, working_dire
     return '<?xml version="1.0" encoding="UTF-16"?>\n' + ET.tostring(task, encoding="unicode")
 
 
-def export_task_xml() -> str:
+def export_task_xml(task_name: str = AUTO_RECOVERY_TASK_NAME) -> str:
     """Return the current task definition, for restoring it if an upgrade fails.
 
     Read through PowerShell rather than schtasks: the output crosses the process
@@ -183,7 +189,7 @@ def export_task_xml() -> str:
     survives the round trip intact. Absence is decided by automation_task_status, never
     by this function, so a failed export can never be mistaken for "there was no task".
     """
-    name = shell.ps_single_quote(AUTO_RECOVERY_TASK_NAME)
+    name = shell.ps_single_quote(task_name)
     script = f"Export-ScheduledTask -TaskName {name} -TaskPath '\\' -ErrorAction Stop"
     try:
         exported = shell.run_powershell(script)
@@ -256,13 +262,13 @@ class WindowsTaskBackend:
         return delete_task()
 
 
-def register_task_xml(xml_text: str) -> None:
+def register_task_xml(xml_text: str, name: str = AUTO_RECOVERY_TASK_NAME) -> None:
     descriptor, path = tempfile.mkstemp(prefix="claude-restart-task-", suffix=".xml")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-16") as handle:
             handle.write(xml_text)
         completed = subprocess.run(
-            ["schtasks.exe", "/Create", "/TN", AUTO_RECOVERY_TASK_NAME, "/XML", path, "/F"],
+            ["schtasks.exe", "/Create", "/TN", name, "/XML", path, "/F"],
             capture_output=True,
             text=True,
             errors="replace",
@@ -279,9 +285,9 @@ def register_task_xml(xml_text: str) -> None:
         raise RecoveryError(f"Could not register {AUTO_RECOVERY_TASK_NAME}: {detail}")
 
 
-def delete_task() -> subprocess.CompletedProcess[str]:
+def delete_task(name: str = AUTO_RECOVERY_TASK_NAME) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["schtasks.exe", "/Delete", "/TN", AUTO_RECOVERY_TASK_NAME, "/F"],
+        ["schtasks.exe", "/Delete", "/TN", name, "/F"],
         capture_output=True,
         text=True,
         errors="replace",

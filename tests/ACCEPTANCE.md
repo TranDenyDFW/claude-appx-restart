@@ -127,6 +127,7 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | A tag that moves between the draft and the publish stops without publishing | tests/test_release_workflow.py::test_a_tag_that_moves_before_publishing_stops_without_publishing |
 | An asset that changes after its own upload check stops without publishing | tests/test_release_workflow.py::test_an_asset_that_changes_after_its_upload_check_stops_without_publishing |
 | The coverage map checker refuses a renamed test, a missing file and a malformed row | tests/test_acceptance_checker.py::test_a_row_naming_a_test_that_does_not_exist_fails, tests/test_acceptance_checker.py::test_a_row_naming_a_tool_that_does_not_exist_fails, tests/test_acceptance_checker.py::test_a_row_that_is_not_two_columns_is_reported |
+| A task definition survives an export and a restore, which is what a rollback depends on | tests/test_task_roundtrip_windows.py::test_a_registered_task_survives_an_export_and_a_restore, tests/test_task_roundtrip_windows.py::test_an_absent_task_reports_itself_absent (elevated only, runs on CI) |
 
 ## Manual release gate
 

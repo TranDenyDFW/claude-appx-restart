@@ -197,6 +197,10 @@ if argv[:1] == ["api"]:
         out("{}")
     if method == "PATCH":
         release_id = path.rsplit("/", 1)[-1]
+        if state.get("patch_fails_once") and not state.get("patch_failed"):
+            state["patch_failed"] = True
+            save()
+            fail("the publish call failed", 1)
         releases[release_id]["draft"] = False
         releases[release_id]["immutable"] = state.get("immutable_after_publish", True)
         save()
@@ -214,6 +218,9 @@ if argv[:1] == ["api"]:
         moved = state.get("tag_sha_after_read")
         if moved and state["tag_reads"] >= int(state.get("tag_moves_at_read", 2)):
             out({"object": {"sha": moved, "type": "commit"}})
+        if state.get("annotated_tag"):
+            # An annotated tag points at a tag object, which has to be dereferenced again.
+            out({"object": {"sha": "a" * 40, "type": "tag"}})
         out({"object": {"sha": state.get("tag_sha", os.environ["BUILT_SHA"]), "type": "commit"}})
     if "/git/tags/" in path:
         out({"object": {"sha": state.get("tag_sha", os.environ["BUILT_SHA"]), "type": "commit"}})
@@ -400,6 +407,52 @@ class ReleaseScriptTests(unittest.TestCase):
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()))
+
+    def test_a_publish_that_fails_once_succeeds_on_the_next_run(self) -> None:
+        # Re-running the failed job must be safe: the draft is still there, and the second
+        # attempt publishes it rather than making a second release.
+        self.state(patch_fails_once=True)
+        first = self.run_script()
+        self.assertNotEqual(first.returncode, 0)
+        releases = list(self.current()["releases"].values())
+        self.assertTrue(releases and releases[0]["draft"], "a failed publish leaves the draft alone")
+        second = self.run_script()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        releases = list(self.current()["releases"].values())
+        self.assertEqual(len(releases), 1, releases)
+        self.assertFalse(releases[0]["draft"])
+
+    def test_a_published_release_beside_a_draft_is_refused(self) -> None:
+        # Ambiguous state is refused rather than guessed at, and nothing is changed.
+        draft = {
+            "id": 501,
+            "tag_name": TAG,
+            "draft": True,
+            "immutable": False,
+            "upload_url": "https://uploads.invalid/501/assets{?name,label}",
+            "assets": [],
+        }
+        self.state(releases={"500": self.published_release(), "501": draft})
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
+        self.assertEqual(mutating, [], self.calls())
+
+    def test_a_manifest_that_disagrees_with_the_checksums_is_refused(self) -> None:
+        sums = self.dist / "SHA256SUMS.txt"
+        lines = sums.read_text(encoding="utf-8").splitlines()
+        lines[0] = "0" * 64 + lines[0][64:]
+        sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.state()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
+        self.assertEqual(mutating, [], self.calls())
+
+    def test_an_annotated_tag_that_peels_to_the_built_commit_publishes(self) -> None:
+        self.state(annotated_tag=True)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_an_identical_published_release_is_left_alone(self) -> None:
         self.state(releases={"500": self.published_release()})
