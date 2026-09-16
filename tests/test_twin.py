@@ -7,7 +7,9 @@ get used: the pathname is never reopened between checking and copying.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
 from pathlib import Path
 import sys
@@ -24,6 +26,10 @@ from clauderestart.errors import RecoveryError, SafetyStop  # noqa: E402
 
 QUIET_BYTES = b"windowed twin bytes"
 OTHER_RELEASE_BYTES = b"windowed twin bytes from another release"
+# Same byte count as QUIET_BYTES, so the size check cannot refuse it and only the digest can.
+SAME_LENGTH_TAMPERED = b"tampered twin bytes"
+# Sentinel so a test can ask for no embedded record at all, which None cannot express here.
+MATCHING_RECORD = object()
 
 
 def record_for(data: bytes, *, version: str = "1.0.2", name: str = payload.QUIET_EXE_NAME) -> twin.EmbeddedTwin:
@@ -73,6 +79,18 @@ class TwinAuthenticationTests(unittest.TestCase):
             self.authenticate()
         self.assertIn(hashlib.sha256(OTHER_RELEASE_BYTES).hexdigest(), str(stop.exception))
 
+    def test_a_same_length_tampered_twin_is_refused_by_the_digest_alone(self) -> None:
+        # Without this fixture the digest comparison is dead weight: every other tampering case
+        # differs in length, so the size check decides and removing the digest check stays green.
+        self.assertEqual(len(SAME_LENGTH_TAMPERED), len(QUIET_BYTES))
+        self.assertNotEqual(SAME_LENGTH_TAMPERED, QUIET_BYTES)
+        self.twin_path.write_bytes(SAME_LENGTH_TAMPERED)
+        with self.assertRaises(SafetyStop) as stop:
+            self.authenticate()
+        message = str(stop.exception)
+        self.assertIn(hashlib.sha256(SAME_LENGTH_TAMPERED).hexdigest(), message)
+        self.assertIn(self.record.sha256, message)
+
     def test_size_mismatch_with_a_matching_digest_is_refused(self) -> None:
         wrong_size = twin.EmbeddedTwin(
             name=self.record.name, sha256=self.record.sha256, size=self.record.size + 1, version="1.0.2"
@@ -88,12 +106,17 @@ class TwinAuthenticationTests(unittest.TestCase):
         self.assertIn("no record", str(stop.exception))
 
     def test_a_missing_twin_names_both_candidates(self) -> None:
+        # Beside a console named ClaudeRestart.exe the canonical and stem derived candidate names
+        # are the same string, so a two candidate assertion there proves nothing. Rename it.
+        renamed_console = self.folder / "claude-restart-1.0.2.exe"
+        self.console.rename(renamed_console)
         self.twin_path.unlink()
         with self.assertRaises(SafetyStop) as stop:
-            self.authenticate()
+            self.authenticate(console=renamed_console)
         message = str(stop.exception)
+        self.assertNotEqual(payload.QUIET_EXE_NAME, "claude-restart-1.0.2-quiet.exe")
         self.assertIn(payload.QUIET_EXE_NAME, message)
-        self.assertIn("ClaudeRestart-quiet.exe", message)
+        self.assertIn("claude-restart-1.0.2-quiet.exe", message)
 
     def test_a_renamed_pair_authenticates_the_stem_named_twin(self) -> None:
         renamed_console = self.folder / "claude-restart-1.0.2.exe"
@@ -190,6 +213,96 @@ class LockedFileTests(unittest.TestCase):
             self.assertFalse(locked.is_reparse_point())
         finally:
             locked.close()
+
+
+@unittest.skipUnless(sys.platform == "win32", "the entry point locks its own executable")
+class InstallEntryPointTests(unittest.TestCase):
+    """Drive cli.main all the way through a frozen install.
+
+    No test reached this path before. The only installer test took the unknown identity
+    branch and returned before the twin was ever touched, so a missing import on the line
+    that authenticates the twin shipped with a green suite: the run exited 3 with an
+    internal error instead of the documented safety stop, having verified nothing and
+    installed nothing.
+    """
+
+    def setUp(self) -> None:
+        winapi.configure()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name).resolve()
+        self.console = self.folder / payload.CONSOLE_EXE_NAME
+        self.console.write_bytes(b"console bytes")
+        # Registered after the directory cleanup so it runs first: the lock must be released
+        # before the temporary folder can be removed.
+        self.addCleanup(self.release_console_lock)
+
+    def release_console_lock(self) -> None:
+        lock = getattr(twin, "_console_lock", None)
+        if lock is not None:
+            lock.close()
+        twin._console_lock = None
+
+    def confirmed_package(self):
+        from clauderestart import package as package_module
+
+        return package_module.PackageInfo(
+            name="Claude",
+            version="1.52386.6.0",
+            package_full_name="Claude_1.52386.6.0_x64__pzs8sxrjxfjjc",
+            package_family_name=package_module.EXPECTED_PACKAGE_FAMILY,
+            install_location=str(self.folder),
+            application_id="Claude",
+            user_sid="S-1-5-21-0-0-0-1001",
+        )
+
+    def run_main(self, *argv: str, embedded: object = MATCHING_RECORD):
+        """Run the entry point and return its exit code, the task backend, and its output.
+
+        The embedded record is supplied explicitly. A source checkout carries the placeholder,
+        so without this every case would refuse for a missing record before it ever looked for
+        the twin, and each test would pass for the wrong reason.
+        """
+        from clauderestart import cli
+
+        record = record_for(QUIET_BYTES) if embedded is MATCHING_RECORD else embedded
+        stream = io.StringIO()
+        with support.frozen_at(self.console), mock.patch.object(
+            sys, "argv", [str(self.console), *argv]
+        ), mock.patch.object(winapi, "is_admin", return_value=True), mock.patch.object(
+            twin, "load_embedded_twin", return_value=record
+        ), mock.patch.object(
+            cli, "get_claude_package", return_value=self.confirmed_package()
+        ), mock.patch.object(cli.task, "register_task_xml") as register, contextlib.redirect_stdout(stream):
+            return cli.main(), register, stream.getvalue()
+
+    def test_a_missing_twin_exits_with_the_safety_stop_code(self) -> None:
+        self.assertFalse((self.folder / payload.QUIET_EXE_NAME).exists())
+        exit_code, register, output = self.run_main("--install-automation", "--no-elevate")
+        self.assertEqual(exit_code, 2)
+        self.assertIn("was not found beside", output)
+        register.assert_not_called()
+
+    def test_a_tampered_twin_exits_with_the_safety_stop_code(self) -> None:
+        (self.folder / payload.QUIET_EXE_NAME).write_bytes(SAME_LENGTH_TAMPERED)
+        exit_code, register, output = self.run_main("--install-automation", "--no-elevate")
+        self.assertEqual(exit_code, 2)
+        self.assertIn("is not the windowed twin this build was made with", output)
+        register.assert_not_called()
+
+    def test_a_build_without_a_record_exits_with_the_safety_stop_code(self) -> None:
+        (self.folder / payload.QUIET_EXE_NAME).write_bytes(QUIET_BYTES)
+        exit_code, register, output = self.run_main("--install-automation", "--no-elevate", embedded=None)
+        self.assertEqual(exit_code, 2)
+        self.assertIn("carries no record of its windowed twin", output)
+        register.assert_not_called()
+
+    def test_the_install_path_never_reports_an_internal_error(self) -> None:
+        # Exit 3 means an exception reached the last resort handler. That is exactly what a
+        # name used but never imported produced on this path, and no other test would see it.
+        exit_code, _, output = self.run_main("--install-automation", "--no-elevate")
+        self.assertNotEqual(exit_code, 3)
+        self.assertNotIn("INTERNAL ERROR", output)
 
 
 if __name__ == "__main__":

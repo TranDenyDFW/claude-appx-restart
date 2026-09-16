@@ -57,7 +57,11 @@ class GrowthTests(unittest.TestCase):
         inspector = FakeJobInspector([[101, 102], [101, 102, 103]])
         with self.assertRaises(SafetyStop) as stop:
             self.repair(inspector)
-        self.assertIn("103", str(stop.exception))
+        # Assert the reason, not just the PID: without the growth guard the same PID reaches the
+        # unverified check, whose message also names it, so a PID-only assertion cannot fail.
+        message = str(stop.exception)
+        self.assertIn("gained member", message)
+        self.assertIn("103", message)
         self.assertEqual(inspector.terminate_calls, 0)
 
     def test_a_member_added_after_validation_stops_the_repair(self) -> None:
@@ -69,8 +73,9 @@ class GrowthTests(unittest.TestCase):
 
     def test_a_member_added_between_the_final_snapshots_stops_the_repair(self) -> None:
         inspector = FakeJobInspector([[101, 102], [101, 102], [101, 102], [101, 102, 103]])
-        with self.assertRaises(SafetyStop):
+        with self.assertRaises(SafetyStop) as stop:
             self.repair(inspector)
+        self.assertIn("appeared after validation", str(stop.exception))
         self.assertEqual(inspector.terminate_calls, 0)
 
     def test_a_reused_process_number_stops_the_repair(self) -> None:
