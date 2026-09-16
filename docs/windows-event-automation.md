@@ -39,8 +39,10 @@ and are deliberately not matched.
 `build_task_xml`) rather than from `schtasks` switches, because the switch
 defaults leave two settings enabled that silently disable the task on a laptop
 running on battery and impose a 72-hour time limit. The registered settings are
-re-read and validated immediately after registration; on any mismatch the task
-is deleted again.
+re-read and validated immediately after registration, including that the file the
+task runs is the very file just installed, compared by identity rather than by name.
+On any mismatch the definition that was there before is put back unchanged; when
+there was no task before, the one just registered is removed.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -51,27 +53,53 @@ is deleted again.
 | `StopIfGoingOnBatteries` | `false` | Unplugging must not abort a repair |
 | `ExecutionTimeLimit` | `PT5M` | A stuck run is terminated after five minutes |
 | `Priority` | `5` | Slightly above the below-normal default so the repair is not starved |
-| Action | `"C:\Program Files\ClaudeRestart\ClaudeRestart-quiet.exe" --event-triggered --yes --wait 30` (or `pythonw.exe "<folder>\claude_restart.py" ...` from source) | The windowed build runs with no console window, from a folder only administrators can change |
+| Action | `"C:\Program Files\ClaudeRestart\versions\<version>-<id>\ClaudeRestart-quiet.exe" --event-triggered --yes --wait 30` (or `pythonw.exe "<folder>\claude_restart.py" ...` from source) | The windowed build runs with no console window, from a folder only administrators can change |
 
 ### Install location
 
 The task runs with administrator rights, so the executables install into
-`C:\Program Files\ClaudeRestart` before the task is registered. The folder is
-resolved with `SHGetKnownFolderPath(FOLDERID_ProgramFiles)` rather than
-`%ProgramFiles%`, so a non-elevated caller cannot redirect the install by setting an
-environment variable before the elevation prompt. Both executables are required;
-each copy is compared byte for byte with its source, and a failed copy stops before
-the task is touched. The files inherit the Program Files permissions, which let
-standard users read and run them but not change them. `--remove-automation` deletes
-only the files the installer placed there and removes the folder when nothing else
-remains. Running from source skips the copy and warns that the task will run the
-interpreter and script from their current location.
+`C:\Program Files\ClaudeRestart\versions\<version>-<id>` before the task is
+registered. The root is resolved with `SHGetKnownFolderPath(FOLDERID_ProgramFiles)`
+rather than `%ProgramFiles%`, so a non-elevated caller cannot redirect the install by
+setting an environment variable before the elevation prompt.
 
-`--automation-status` prints the same settings, including whether the task
-starts on battery and keeps running when the machine is unplugged, together
-with the last run time and result. `--install-automation` refuses to register
-the task when the installed Claude application id no longer matches the
-trigger identity, since such a task could never fire.
+Before anything is written, the root is proven to be administrator-only: owner SYSTEM,
+Administrators or TrustedInstaller, an explicit protected permission list holding
+exactly SYSTEM and Administrators full control plus Users read and execute, and no
+reparse point or hard-linked file anywhere beneath it. Permissions are read and written
+through open handles rather than by pathname, so a junction cannot redirect the check or
+the repair. A list that merely still inherits from Program Files is repaired and then
+re-verified; a folder any other account can write is refused outright, because that
+account could change it between the check and the copy.
+
+Each version installs into its own folder, which is never modified afterwards. The
+payload is staged into a new folder, every staged file is hashed and re-checked through
+a fresh handle, the folder is renamed into place, re-checked again, and only then does
+the task point at it. Nothing is ever written over the files the live task runs, so a
+failure at any point leaves the previous version and the previous task working. The
+previous task definition is captured before any of this and put back if registering or
+verifying the new one fails.
+
+`--remove-automation` consults the record written during installation and deletes only
+what it lists; unknown files, changed files and anything resolving outside the folder
+are kept and reported, and the folder goes only when it is empty. `--force-cleanup`
+also deletes files that changed since installation. Running from source installs
+nothing into Program Files and warns that the task will run the interpreter and script
+from their current location.
+
+`--automation-status` prints the same settings, including whether the task starts on
+battery and keeps running when the machine is unplugged, together with the last run
+time and result, the exact file the task runs, whether that file sits inside the
+protected folder, and whether the installed files still match what was installed.
+
+`--install-automation` refuses to register the task when the installed Claude
+application id differs from the trigger identity, since such a task could never fire,
+and also when that id cannot be established at all. The id is read from the package
+manifest: exactly one application selects it, several select the expected id only when
+exactly one of them equals it, and anything else, including a manifest that cannot be
+read, leaves the identity unknown. An unknown identity stops the tool before it
+terminates anything, so it can never close the obsolete Job and then find itself unable
+to start Claude again.
 
 ## Recovery flow
 
@@ -82,10 +110,28 @@ relaunching Claude:
    last 10 minutes.
 2. `Appinfo` holds an exact `Container_Claude_<version>` Job for the same user.
 3. The Job version is older than the registered Claude version.
-4. Every live member is in the current user's session. A member that exited
-   between the Job snapshot and this check is treated as benign, not as a
-   foreign session.
-5. The duplicated Job handle grants query and terminate access.
+4. The duplicated Job handle grants query and terminate access.
+5. The Job's membership can be frozen: a handle duplicated with
+   `JOB_OBJECT_SET_ATTRIBUTES` is required, and a Job that refuses one is left alone.
+6. Every member is checked between two membership snapshots. Each must be in the
+   current user's session and must report a start time. A member that left between the
+   snapshots is benign and costs one of three attempts; a member that appeared was never
+   checked, so the repair stops rather than terminating it.
+7. The Job is then frozen with `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` set to the number of
+   validated members, so it cannot grow, and membership is read once more immediately
+   before termination. Each member must still be the same process, compared by start
+   time, so a reused process number cannot pass. The limit is always restored and the
+   extra handle always closed, on every path.
+
+Residual window: once the final check matches, the only remaining change is a validated
+member exiting and one of the old package's own processes taking its place inside the
+frozen Job. The limit prevents any growth, and the start-time comparison prevents a
+reused number from passing, but Windows offers no primitive that checks membership and
+terminates in one step. A run killed while the freeze is applied can leave the limit on
+the obsolete Job; the next run reports that and replaces it.
+
+`--scan` probes this on every Claude Job, current ones included, and reports whether the
+freeze is available, because an obsolete Job exists only while the failure is happening.
 
 If the event matches but no exact stale Job exists, the task does **not** launch
 Claude. This prevents a different `0x80070020` cause from producing a recovery

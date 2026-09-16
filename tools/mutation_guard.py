@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Prove the security tests can fail, by removing each behaviour and requiring a red test.
+
+A test suite that stays green when the behaviour it claims to protect is deleted proves
+nothing. Every entry below is a behaviour this project's security claims rest on, and every
+one of them once survived deletion with the whole suite green. Each is applied to a throwaway
+copy of the tree; the named test files must turn red.
+
+A mutation whose text no longer matches is reported and fails the run. That is deliberate:
+after a refactor the guard must be updated rather than silently passing on a mutation it can
+no longer apply.
+
+    py -3 tools/mutation_guard.py
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+IGNORE = shutil.ignore_patterns(".git", "tmp", "dist", "build", ".venv-build", "__pycache__", ".md")
+
+INSTALL_TESTS = ("tests.test_install_transaction", "tests.test_remove")
+
+# (label, file, exact text to remove or weaken, replacement, test modules that must turn red)
+MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
+    (
+        "the twin digest comparison",
+        "clauderestart/twin.py",
+        "if observed != record.sha256 or size != record.size:",
+        "if size != record.size:",
+        ("tests.test_twin",),
+    ),
+    (
+        "the membership growth guard during validation",
+        "clauderestart/recovery.py",
+        """    added = recheck - snapshot
+    if added:
+        raise SafetyStop(
+            f"Refusing to terminate {job.name}: it gained member(s) {sorted(added)} while they were being "
+            "checked, so they were never verified."
+        )""",
+        "    added = recheck - snapshot",
+        ("tests.test_recovery_race",),
+    ),
+    (
+        "the Path import the frozen install path needs",
+        "clauderestart/cli.py",
+        "import os\nfrom pathlib import Path\nimport subprocess",
+        "import os\nimport subprocess",
+        ("tests.test_twin",),
+    ),
+    (
+        "the check that the registered task runs the installed executable",
+        "clauderestart/task.py",
+        """    registered = task_command_path(status.get("Execute"))
+    if winapi.canonical(registered) != winapi.canonical(executable):
+        problems.append(f"the task runs {registered}, expected {executable}")
+    return problems""",
+        "    return problems",
+        ("tests.test_task_xml",),
+    ),
+    (
+        "the build stage guard digest comparison",
+        "build.py",
+        "    if digest != record.sha256 or size != record.size:",
+        "    if size != record.size:",
+        ("tests.test_build",),
+    ),
+    (
+        "the build stage guard refusing an absent twin",
+        "build.py",
+        """    if not built.is_file():
+        sys.exit(
+            f"The console stage has no windowed twin at {built} to check its record against, so the "
+            "record cannot be trusted. Run: py -3 build.py"
+        )""",
+        "    if not built.is_file():\n        return record",
+        ("tests.test_build",),
+    ),
+    (
+        "the manifest comparing the digest of an installed file",
+        "clauderestart/install.py",
+        '            if observed != digest or observed_size != size:\n'
+        '                problems.append(f"{relative} does not match what was installed")',
+        '            if observed_size != size:\n'
+        '                problems.append(f"{relative} does not match what was installed")',
+        INSTALL_TESTS,
+    ),
+    (
+        "refusing a staged file that is not part of the release",
+        "clauderestart/install.py",
+        '        if relative not in recorded:\n'
+        '            raise SafetyStop(f"{path} appeared in the staged files but is not part of this release.")',
+        '        if False:\n'
+        '            raise SafetyStop(f"{path} appeared in the staged files but is not part of this release.")',
+        INSTALL_TESTS,
+    ),
+    (
+        "tying the staged twin to the authenticated record",
+        "clauderestart/install.py",
+        '            if relative == payload.QUIET_EXE_NAME and digest != twin_sha:\n'
+        '                raise SafetyStop("The staged windowed executable is not the one this build was made with.")',
+        '            if False:\n'
+        '                raise SafetyStop("The staged windowed executable is not the one this build was made with.")',
+        INSTALL_TESTS,
+    ),
+    (
+        "acting on the committed manifest verdict",
+        "clauderestart/install.py",
+        '    problems = manifest.verify(final)\n'
+        '    if problems:\n'
+        '        raise SafetyStop(f"The installed files in {final} did not verify: " + "; ".join(problems))',
+        '    problems = manifest.verify(final)\n'
+        '    if False:\n'
+        '        raise SafetyStop(f"The installed files in {final} did not verify: " + "; ".join(problems))',
+        INSTALL_TESTS,
+    ),
+    (
+        "rehashing the committed twin against the record",
+        "clauderestart/install.py",
+        '    if digest.hexdigest() != twin_sha:\n'
+        '        raise SafetyStop(f"The installed windowed executable in {final} is not the authenticated one.")',
+        '    if False:\n'
+        '        raise SafetyStop(f"The installed windowed executable in {final} is not the authenticated one.")',
+        INSTALL_TESTS,
+    ),
+    (
+        "requiring a trusted owner on an installer owned folder",
+        "clauderestart/security.py",
+        # The leading newline keeps this from also matching verify_child's deeper indented copy.
+        "\n    if info.owner not in TRUSTED_OWNERS:",
+        "\n    if False:",
+        ("tests.test_security",),
+    ),
+    (
+        "requiring the permission list to be protected from inheritance",
+        "clauderestart/security.py",
+        "    elif not inherited and not info.control & winapi.SE_DACL_PROTECTED:",
+        "    elif False:",
+        ("tests.test_security",),
+    ),
+    (
+        "discarding the staged payload when the commit rename fails",
+        "clauderestart/install.py",
+        """    try:
+        _commit_staging(staging, final, reporter)
+    except BaseException:
+        # Otherwise the error says nothing was changed while the whole payload sits in
+        # Program Files under a staging name.
+        _discard(staging)
+        raise""",
+        "    _commit_staging(staging, final, reporter)",
+        INSTALL_TESTS,
+    ),
+    (
+        "comparing the registered task's file by handle identity, not only by name",
+        "clauderestart/install.py",
+        """                if not os.path.samestat(check.stat(), locked.stat()):
+                    problems.append("the registered task runs a different file from the one installed")""",
+        """                if False:
+                    problems.append("the registered task runs a different file from the one installed")""",
+        INSTALL_TESTS,
+    ),
+    (
+        "rechecking the whole asset set immediately before publishing",
+        ".github/workflows/build.yml",
+        """          verify_assets "$release_id"
+          peel_tag
+          gh api -X PATCH""",
+        """          peel_tag
+          gh api -X PATCH""",
+        ("tests.test_release_workflow",),
+    ),
+    (
+        "rechecking the tag immediately before publishing",
+        ".github/workflows/build.yml",
+        """          verify_assets "$release_id"
+          peel_tag
+          gh api -X PATCH""",
+        """          verify_assets "$release_id"
+          gh api -X PATCH""",
+        ("tests.test_release_workflow",),
+    ),
+]
+
+
+def run(subject: Path, modules: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "unittest", *modules],
+        cwd=str(subject),
+        capture_output=True,
+        text=True,
+    )
+
+
+def main() -> int:
+    survivors: list[str] = []
+    for label, relative, old, new, modules in MUTATIONS:
+        with tempfile.TemporaryDirectory() as work:
+            subject = Path(work) / "subject"
+            shutil.copytree(ROOT, subject, ignore=IGNORE)
+
+            target = subject / relative
+            text = target.read_text(encoding="utf-8")
+            if text.count(old) != 1:
+                print(f"STALE    {label}: the text matched {text.count(old)} time(s), expected 1")
+                survivors.append(label)
+                continue
+
+            baseline = run(subject, modules)
+            if baseline.returncode != 0:
+                print(f"BROKEN   {label}: the tests already fail unmutated, so the result means nothing")
+                survivors.append(label)
+                continue
+
+            target.write_text(text.replace(old, new), encoding="utf-8")
+            mutated = run(subject, modules)
+            if mutated.returncode == 0:
+                print(f"SURVIVED {label}: the tests stayed green with the behaviour removed")
+                survivors.append(label)
+            else:
+                summary = [line for line in mutated.stderr.splitlines() if line.strip()][-1]
+                print(f"CAUGHT   {label} ({summary})")
+
+    caught = len(MUTATIONS) - len(survivors)
+    print(f"\n{caught}/{len(MUTATIONS)} mutation(s) caught")
+    if survivors:
+        print("\nThese behaviours can be removed without any test noticing:", file=sys.stderr)
+        for label in survivors:
+            print(f"  {label}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
