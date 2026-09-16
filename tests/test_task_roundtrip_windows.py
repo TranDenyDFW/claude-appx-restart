@@ -60,7 +60,12 @@ class TaskRoundTripTests(unittest.TestCase):
 
         # The principal decides which account runs the task and at what level. An export
         # that dropped it would restore a task that never fires for this user.
-        self.assertEqual(status.get("UserId"), self.sid, status)
+        #
+        # Task Scheduler reports the principal by account name, not by the identifier the
+        # definition was written with, so this compares what Windows reports before and after
+        # the round trip rather than against the identifier passed in.
+        principal = status.get("UserId")
+        self.assertTrue(principal, status)
 
         exported = task.export_task_xml(self.name)
         self.assertTrue(exported.strip(), "the export must not be empty")
@@ -75,7 +80,7 @@ class TaskRoundTripTests(unittest.TestCase):
         self.assertEqual(
             task.verify_registered_task(restored, task.TASK_ARGUMENTS, self.executable), [], restored
         )
-        self.assertEqual(restored.get("UserId"), self.sid, restored)
+        self.assertEqual(restored.get("UserId"), principal, restored)
         self.assertEqual(restored.get("LogonType"), status.get("LogonType"))
         self.assertEqual(restored.get("RunLevel"), status.get("RunLevel"))
 
