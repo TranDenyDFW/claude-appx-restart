@@ -20,6 +20,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 TABLE_ROW = re.compile(r"^\|(?P<item>[^|]+)\|(?P<evidence>[^|]+)\|\s*$")
 TEST_REFERENCE = re.compile(r"(?P<file>tests/[A-Za-z0-9_]+\.py)(?:::(?P<test>[A-Za-z0-9_]+))?")
+# Any repository file a row names, not just a test file. A row that points at a tool which
+# was renamed or deleted reads as evidence and is worth nothing.
+FILE_REFERENCE = re.compile(r"(?P<file>(?:tests|tools|docs)/[A-Za-z0-9_./-]+\.(?:py|md|txt|yml))")
 
 
 def known_tests(path: Path) -> set[str]:
@@ -36,9 +39,13 @@ def check(acceptance: Path) -> list[str]:
     problems: list[str] = []
     rows = 0
     references = 0
-    for line in acceptance.read_text(encoding="utf-8").splitlines():
+    for number, line in enumerate(acceptance.read_text(encoding="utf-8").splitlines(), start=1):
         match = TABLE_ROW.match(line)
         if not match:
+            # A line that looks like a table row but is not two columns was silently ignored,
+            # so a malformed row could carry a claim nothing ever checked.
+            if line.lstrip().startswith("|"):
+                problems.append(f"line {number} looks like a table row but is not two columns: {line.strip()}")
             continue
         evidence_cell = match.group("evidence").strip()
         # Skip a table's own header and its separator line, which carry no evidence.
@@ -49,6 +56,10 @@ def check(acceptance: Path) -> list[str]:
         found = list(TEST_REFERENCE.finditer(evidence))
         if not found and "manual" not in evidence.lower():
             problems.append(f"row names no test and no manual step: {match.group('item').strip()}")
+        for reference in FILE_REFERENCE.finditer(evidence):
+            named = reference.group("file")
+            if not (ROOT / named).is_file():
+                problems.append(f"line {number} names {named}, which does not exist")
         for reference in found:
             references += 1
             path = ROOT / reference.group("file")

@@ -151,6 +151,7 @@ if tool == "curl":
             "digest": None if state.get("no_digest") == name else f"sha256:{digest}",
         }
     )
+    state["reads_since_upload"] = 0
     save()
     out("{}")
 
@@ -208,12 +209,25 @@ if argv[:1] == ["api"]:
     if path.endswith("/releases"):
         out(list(releases.values()))
     if "/git/ref/tags/" in path:
+        state["tag_reads"] = int(state.get("tag_reads", 0)) + 1
+        save()
+        moved = state.get("tag_sha_after_read")
+        if moved and state["tag_reads"] >= int(state.get("tag_moves_at_read", 2)):
+            out({"object": {"sha": moved, "type": "commit"}})
         out({"object": {"sha": state.get("tag_sha", os.environ["BUILT_SHA"]), "type": "commit"}})
     if "/git/tags/" in path:
         out({"object": {"sha": state.get("tag_sha", os.environ["BUILT_SHA"]), "type": "commit"}})
     if path.endswith("/assets"):
         release_id = path.split("/releases/")[1].split("/")[0]
-        out(releases[release_id]["assets"])
+        state["reads_since_upload"] = int(state.get("reads_since_upload", 0)) + 1
+        save()
+        listed = [dict(asset) for asset in releases[release_id]["assets"]]
+        spoil = state.get("corrupt_asset")
+        if spoil and state["reads_since_upload"] >= 2:
+            for asset in listed:
+                if asset["name"] == spoil:
+                    asset["digest"] = "sha256:" + "0" * 64
+        out(listed)
     if "/releases/" in path:
         release_id = path.rsplit("/", 1)[-1]
         out(releases[release_id])
@@ -360,6 +374,23 @@ class ReleaseScriptTests(unittest.TestCase):
 
     def test_an_upload_that_arrives_corrupted_stops_before_publishing(self) -> None:
         self.state(corrupt_upload="ClaudeRestart-quiet.exe")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
+
+    def test_a_tag_that_moves_before_publishing_stops_without_publishing(self) -> None:
+        # The tag points at the built commit when the draft is made and moves afterwards.
+        # Only the check taken immediately before the publish can see that.
+        self.state(tag_sha_after_read="0" * 40, tag_moves_at_read=2)
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
+
+    def test_an_asset_that_changes_after_its_upload_check_stops_without_publishing(self) -> None:
+        # Each upload is re-read as it happens, and this asset passes that. It only goes wrong
+        # on the listing taken immediately before publishing, so the pre-publish verification
+        # is the only thing that can refuse it.
+        self.state(corrupt_asset="ClaudeRestart-quiet.exe")
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())

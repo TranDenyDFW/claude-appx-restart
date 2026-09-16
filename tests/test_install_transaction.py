@@ -216,6 +216,27 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(len(reporter.lines), 1, reporter.lines)
         self.assertIn("not installed", reporter.lines[0])
 
+    def test_a_task_naming_the_right_path_but_a_different_file_is_refused(self) -> None:
+        """The handle identity check, which the name comparison cannot stand in for.
+
+        A task action can name exactly the right path while the file at that path is not the
+        one that was just verified. Comparing the paths sees nothing wrong. Only comparing the
+        open handles does, and that is the check the documentation promises by name.
+        """
+        folder = self.seed_previous_version()
+        decoy = self.base / "decoy.exe"
+        decoy.write_bytes(b"a different file entirely")
+        installed = folder / payload.QUIET_EXE_NAME
+        locked = winapi.open_locked(decoy)
+        self.addCleanup(locked.close)
+        tasks = support.FakeTaskBackend()
+        with self.assertRaises(SafetyStop) as stop:
+            install._register_and_verify(
+                self.reporter, tasks, installed, package(), folder, None, False, locked
+            )
+        self.assertIn("runs a different file from the one installed", str(stop.exception))
+        self.assertEqual(tasks.deleted, 1, "a task that cannot be verified is taken back out")
+
     def test_a_failure_while_staging_leaves_the_previous_install_untouched(self) -> None:
         first = self.seed_previous_version()
         before_tree = support.tree_hash(first)

@@ -121,8 +121,12 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | Install, elevation and task duties live outside the recovery module | tests/test_imports.py::test_every_module_follows_the_import_rules, tests/test_imports.py::test_the_scan_reports_known_bad_sources |
 | Destructive Windows operations sit behind interfaces so failures can be injected | tests/test_recovery_race.py::test_a_job_that_cannot_be_frozen_is_never_terminated, tests/test_install_transaction.py::test_a_failed_rename_reports_a_retry_and_changes_nothing |
 | A limit left behind by a killed run is reported and put back | tests/test_recovery_race.py::test_a_limit_left_by_a_killed_run_is_reported, tests/test_recovery_race.py::test_a_job_with_no_previous_limit_is_not_reported |
-| Every security behaviour has a test that fails when it is removed | manual: enforced on every run by tools/mutation_guard.py, which the workflow runs and which fails when a behaviour can be deleted with the tests still green |
-| A control that skips cannot pass for a control that ran | manual: enforced by tools/run_tests.py --forbid-skips, which the elevated workflow runs |
+| The security behaviours listed in the mutation guard each have a test that fails when the behaviour is removed | manual: enforced on every run by tools/mutation_guard.py, which the workflow runs, which fails when one of its listed behaviours can be deleted with the tests still green, and which fails rather than passing quietly when a listed behaviour's code has moved. It is a named list, not a proof about every behaviour in the project |
+| A control that skips cannot pass for a control that ran | manual: enforced by tools/unit_tests.py --forbid-skips, which the elevated workflow runs |
+| The registered task is compared by handle identity, not only by path | tests/test_install_transaction.py::test_a_task_naming_the_right_path_but_a_different_file_is_refused |
+| A tag that moves between the draft and the publish stops without publishing | tests/test_release_workflow.py::test_a_tag_that_moves_before_publishing_stops_without_publishing |
+| An asset that changes after its own upload check stops without publishing | tests/test_release_workflow.py::test_an_asset_that_changes_after_its_upload_check_stops_without_publishing |
+| The coverage map checker refuses a renamed test, a missing file and a malformed row | tests/test_acceptance_checker.py::test_a_row_naming_a_test_that_does_not_exist_fails, tests/test_acceptance_checker.py::test_a_row_naming_a_tool_that_does_not_exist_fails, tests/test_acceptance_checker.py::test_a_row_that_is_not_two_columns_is_reported |
 
 ## Manual release gate
 

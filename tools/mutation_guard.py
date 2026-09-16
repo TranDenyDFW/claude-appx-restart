@@ -158,6 +158,35 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         "    _commit_staging(staging, final, reporter)",
         INSTALL_TESTS,
     ),
+    (
+        "comparing the registered task's file by handle identity, not only by name",
+        "clauderestart/install.py",
+        """                if not os.path.samestat(check.stat(), locked.stat()):
+                    problems.append("the registered task runs a different file from the one installed")""",
+        """                if False:
+                    problems.append("the registered task runs a different file from the one installed")""",
+        INSTALL_TESTS,
+    ),
+    (
+        "rechecking the whole asset set immediately before publishing",
+        ".github/workflows/build.yml",
+        """          verify_assets "$release_id"
+          peel_tag
+          gh api -X PATCH""",
+        """          peel_tag
+          gh api -X PATCH""",
+        ("tests.test_release_workflow",),
+    ),
+    (
+        "rechecking the tag immediately before publishing",
+        ".github/workflows/build.yml",
+        """          verify_assets "$release_id"
+          peel_tag
+          gh api -X PATCH""",
+        """          verify_assets "$release_id"
+          gh api -X PATCH""",
+        ("tests.test_release_workflow",),
+    ),
 ]
 
 
