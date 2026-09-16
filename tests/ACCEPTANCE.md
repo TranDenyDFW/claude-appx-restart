@@ -48,7 +48,8 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | A member that exits with no replacement may be re-validated and then succeed | tests/test_recovery_race.py::test_a_member_leaving_during_validation_is_retried_and_succeeds, tests/test_recovery_race.py::test_a_member_leaving_after_validation_is_retried_and_succeeds |
 | A process added after the final check cannot be terminated: membership is frozen | tests/test_recovery_race.py::test_a_member_added_between_the_final_snapshots_stops_the_repair, tests/test_job_freeze_windows.py::test_the_freeze_is_what_stops_a_process_from_joining |
 | A Job whose membership cannot be frozen is refused | tests/test_recovery_race.py::test_a_job_that_cannot_be_frozen_is_never_terminated, tests/test_recovery_race.py::test_a_freeze_that_cannot_be_applied_is_never_terminated |
-| Start-time checks are preserved so a reused number cannot satisfy validation | tests/test_recovery_race.py::test_a_member_that_cannot_be_verified_before_termination_stops_the_repair |
+| Start-time checks are preserved so a reused number cannot satisfy validation | tests/test_recovery_race.py::test_a_reused_process_number_stops_the_repair |
+| A member that cannot be verified before termination stops the repair | tests/test_recovery_race.py::test_a_member_that_cannot_be_verified_before_termination_stops_the_repair |
 | The freeze is always restored and the handle always closed | tests/test_recovery_race.py::test_the_freeze_is_restored_when_a_later_query_fails, tests/test_recovery_race.py::test_the_freeze_is_restored_when_termination_fails |
 | The shipped self-check exercises the same driver | tests/test_recovery_race.py::test_the_shipped_self_check_runs_the_race_fixtures, tests/test_build.py::test_a_self_check_that_fails_a_race_guard_stops_the_build |
 | The real kernel behaves as assumed | tests/test_job_freeze_windows.py::test_the_limit_structures_match_the_documented_x64_layout, tests/test_job_freeze_windows.py::test_termination_empties_the_job |
@@ -119,7 +120,8 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | Review item | Evidence |
 |---|---|
 | The payload is defined once and imported by the build and the application | tests/test_build.py::test_the_manifest_lists_every_release_asset_with_its_digest, tests/test_imports.py::test_every_module_follows_the_import_rules |
-| Install, elevation and task duties live outside the recovery module | tests/test_imports.py::test_every_module_follows_the_import_rules, tests/test_imports.py::test_the_scan_reports_known_bad_sources |
+| Install, elevation and task duties live outside the recovery module | tests/test_imports.py::test_the_recovery_module_holds_no_install_or_task_duties |
+| No package module imports the command line, and the leaf modules import nothing from the package | tests/test_imports.py::test_every_module_follows_the_import_rules, tests/test_imports.py::test_the_scan_reports_known_bad_sources |
 | Destructive Windows operations sit behind interfaces so failures can be injected | tests/test_recovery_race.py::test_a_job_that_cannot_be_frozen_is_never_terminated, tests/test_install_transaction.py::test_a_failed_rename_reports_a_retry_and_changes_nothing |
 | A limit left behind by a killed run is reported and put back | tests/test_recovery_race.py::test_a_limit_left_by_a_killed_run_is_reported, tests/test_recovery_race.py::test_a_job_with_no_previous_limit_is_not_reported |
 | The security behaviours listed in the mutation guard each have a test that fails when the behaviour is removed | manual: enforced on every run by tools/mutation_guard.py, which the workflow runs, which fails when one of its listed behaviours can be deleted with the tests still green, and which fails rather than passing quietly when a listed behaviour's code has moved. It is a named list, not a proof about every behaviour in the project |

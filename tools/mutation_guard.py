@@ -224,6 +224,55 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         '              if False:\n                  sys.exit("unused")',
         ("tests.test_release_workflow",),
     ),
+    (
+        'the committed folder resolving to itself after the rename',
+        'clauderestart/install.py',
+        '        if directory.is_reparse_point() or directory.final_path() != winapi.canonical(final):\n            raise SafetyStop(f"{final} did not resolve to itself after it was put in place.")',
+        '        if False:\n            raise SafetyStop("unused")',
+        INSTALL_TESTS,
+    ),
+    (
+        'the committed executable resolving to itself after the rename',
+        'clauderestart/install.py',
+        '    if locked.is_reparse_point() or locked.final_path() != winapi.canonical(final / payload.QUIET_EXE_NAME):\n        raise SafetyStop(f"{final} did not resolve to itself after it was put in place.")',
+        '    if False:\n        raise SafetyStop("unused")',
+        INSTALL_TESTS,
+    ),
+    (
+        'refusing a folder that has no permission list at all',
+        'clauderestart/security.py',
+        '    if not info.control & winapi.SE_DACL_PRESENT:\n        message = "the folder has no permission list"\n        problems.append(message)\n        blocking.append(message)',
+        '    if False:\n        message = "unused"',
+        ("tests.test_security",),
+    ),
+    (
+        'refusing a folder that is itself a reparse point',
+        'clauderestart/security.py',
+        '        if locked.is_reparse_point():\n            return [f"{folder} is a junction, symbolic link, or other reparse point"]',
+        '        if False:\n            return ["unused"]',
+        ("tests.test_security",),
+    ),
+    (
+        'refusing a folder that does not resolve to itself',
+        'clauderestart/security.py',
+        '        if winapi.canonical(folder) != locked.final_path():\n            return [f"{folder} does not resolve to itself ({locked.final_path()})"]',
+        '        if False:\n            return ["unused"]',
+        ("tests.test_security",),
+    ),
+    (
+        'the manifest describing the checksum file that was built',
+        '.github/workflows/build.yml',
+        '          if assets["SHA256SUMS.txt"]["sha256"] != observed:\n              sys.exit("the manifest does not describe the SHA256SUMS.txt that was built")',
+        '          if False:\n              sys.exit("unused")',
+        ("tests.test_release_workflow",),
+    ),
+    (
+        'the manifest adding exactly the checksum file',
+        '.github/workflows/build.yml',
+        '          extra = set(assets) - set(sums)\n          if extra != {"SHA256SUMS.txt"}:\n              sys.exit(f"the manifest must add exactly SHA256SUMS.txt, it adds {sorted(extra)}")',
+        '          extra = set(assets) - set(sums)',
+        ("tests.test_release_workflow",),
+    ),
 ]
 
 

@@ -540,6 +540,39 @@ class StagedAndCommittedVerificationTests(unittest.TestCase):
         self.assertIn(problem, str(stop.exception))
         self.assertIn("after the rename", str(stop.exception))
 
+    def test_a_committed_folder_that_does_not_resolve_to_itself_is_refused(self) -> None:
+        # The only check that the folder now standing at the final name is the folder that
+        # was staged, and not a junction created between the rename and this check.
+        from types import SimpleNamespace
+
+        stub = SimpleNamespace(
+            is_reparse_point=lambda: False,
+            final_path=lambda: str(self.folder.parent / "somewhere-else"),
+            close=lambda: None,
+        )
+        with mock.patch.object(install, "_open_owned_dir", return_value=stub):
+            with self.assertRaises(SafetyStop) as stop:
+                self.verify_committed()
+        self.assertIn("did not resolve to itself", str(stop.exception))
+
+    def test_a_committed_twin_that_does_not_resolve_to_itself_is_refused(self) -> None:
+        # The last check that the file about to be hashed, permission checked and registered
+        # with Task Scheduler is the real executable inside the committed folder.
+        from types import SimpleNamespace
+
+        real = winapi.open_locked(self.quiet)
+        self.addCleanup(real.close)
+        stub = SimpleNamespace(
+            is_reparse_point=lambda: False,
+            final_path=lambda: str(self.folder / "another.exe"),
+            close=lambda: None,
+            stat=real.stat,
+            read_chunks=real.read_chunks,
+        )
+        with self.assertRaises(SafetyStop) as stop:
+            install._verify_committed(self.folder, stub, self.manifest(), self.security, self.twin_sha)
+        self.assertIn("did not resolve to itself", str(stop.exception))
+
     def test_a_committed_twin_that_is_not_the_authenticated_one_is_refused(self) -> None:
         with self.assertRaises(SafetyStop) as stop:
             self.verify_committed(twin_sha="0" * 64)

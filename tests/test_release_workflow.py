@@ -35,6 +35,16 @@ ASSET_BYTES = {
     "ClaudeRestart-quiet.exe": b"the windowed executable",
 }
 MUTATING = ("release create", "-X DELETE", "-X PATCH", "curl")
+# The checks the script makes before it calls anything. A run that refuses on one of
+# these records no call, so these are what prove it ran at all.
+SCRIPT_REFUSALS = (
+    "the build is for",
+    "the build is from commit",
+    "SHA256SUMS.txt names",
+    "the manifest disagree about",
+    "the manifest must add exactly",
+    "does not describe the SHA256SUMS.txt",
+)
 
 
 def git_bash() -> Path | None:
@@ -346,7 +356,15 @@ class ReleaseScriptTests(unittest.TestCase):
         # network, and these tests would prove nothing.
         bin_dir = self.to_posix(self.bin)
         script = self.to_posix(self.script)
-        command = f'export PATH="{bin_dir}:$PATH"; command -v gh >/dev/null || exit 97; exec bash "{script}"'
+        # Require the gh on PATH to be the stand-in itself. Checking only that some gh
+        # exists passes on any machine with the real one installed, and the script would
+        # then reach the real GitHub, which is the thing this prepending exists to prevent.
+        command = (
+            f'export PATH="{bin_dir}:$PATH"; '
+            f'[ "$(command -v gh)" = "{bin_dir}/gh" ] || exit 97; '
+            f'[ "$(command -v curl)" = "{bin_dir}/curl" ] || exit 97; '
+            f'exec bash "{script}"'
+        )
         return subprocess.run(
             [str(git_bash()), "-c", command],
             cwd=self.work,
@@ -354,6 +372,22 @@ class ReleaseScriptTests(unittest.TestCase):
             text=True,
             env=environment,
             check=False,
+        )
+
+    def assert_ran(self, result: subprocess.CompletedProcess) -> None:
+        """The script itself ran, rather than never starting.
+
+        A scenario that asserts only a non-zero exit and no mutating call cannot tell a
+        refusal from a script that never began, so every run is held to this: either it
+        reached the stand-ins, or it refused with one of its own checks that run first.
+        """
+        self.assertNotEqual(result.returncode, 97, "the stand-ins were not on PATH")
+        if self.calls():
+            return
+        output = result.stdout + result.stderr
+        self.assertTrue(
+            any(phrase in output for phrase in SCRIPT_REFUSALS),
+            f"the script made no call and gave none of its own refusals:\n{output}",
         )
 
     def assert_used_stand_ins(self, result: subprocess.CompletedProcess) -> None:
@@ -372,6 +406,7 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_a_clean_run_publishes_only_after_every_asset_verifies(self) -> None:
         self.state()
         result = self.run_script()
+        self.assert_ran(result)
         self.assert_used_stand_ins(result)
         self.assertEqual(result.returncode, 0, result.stderr)
         releases = list(self.current()["releases"].values())
@@ -386,6 +421,7 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_a_failure_during_upload_leaves_the_release_a_draft(self) -> None:
         self.state(fail_next="ClaudeRestart.exe")
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         releases = list(self.current()["releases"].values())
         self.assertTrue(releases and releases[0]["draft"], "an interrupted publish stays a draft")
@@ -393,6 +429,7 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_an_upload_that_arrives_corrupted_stops_before_publishing(self) -> None:
         self.state(corrupt_upload="ClaudeRestart-quiet.exe")
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
 
@@ -401,6 +438,7 @@ class ReleaseScriptTests(unittest.TestCase):
         # Only the check taken immediately before the publish can see that.
         self.state(tag_sha_after_read="0" * 40, tag_moves_at_read=2)
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
 
@@ -410,12 +448,14 @@ class ReleaseScriptTests(unittest.TestCase):
         # is the only thing that can refuse it.
         self.state(corrupt_asset="ClaudeRestart-quiet.exe")
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
 
     def test_an_asset_still_uploading_stops_before_publishing(self) -> None:
         self.state(upload_state="open")
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()))
 
@@ -424,10 +464,12 @@ class ReleaseScriptTests(unittest.TestCase):
         # attempt publishes it rather than making a second release.
         self.state(patch_fails_once=True)
         first = self.run_script()
+        self.assert_ran(first)
         self.assertNotEqual(first.returncode, 0)
         releases = list(self.current()["releases"].values())
         self.assertTrue(releases and releases[0]["draft"], "a failed publish leaves the draft alone")
         second = self.run_script()
+        self.assert_ran(second)
         self.assertEqual(second.returncode, 0, second.stderr)
         releases = list(self.current()["releases"].values())
         self.assertEqual(len(releases), 1, releases)
@@ -445,6 +487,7 @@ class ReleaseScriptTests(unittest.TestCase):
         }
         self.state(releases={"500": self.published_release(), "501": draft})
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
         self.assertEqual(mutating, [], self.calls())
@@ -461,6 +504,7 @@ class ReleaseScriptTests(unittest.TestCase):
         path.write_text(json.dumps(manifest), encoding="utf-8")
         self.state()
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
         self.assertEqual(mutating, [], self.calls())
@@ -469,6 +513,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.rewrite_manifest(commit="9" * 40)
         self.state()
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
         self.assertEqual(mutating, [], self.calls())
@@ -478,6 +523,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.rewrite_manifest(commit=None)
         self.state()
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
         self.assertEqual(mutating, [], self.calls())
@@ -486,26 +532,53 @@ class ReleaseScriptTests(unittest.TestCase):
         self.rewrite_manifest(tag="v9.9.9")
         self.state()
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         mutating = [call for call in self.calls() if any(token in call for token in MUTATING)]
         self.assertEqual(mutating, [], self.calls())
+
+    def test_a_checksum_file_the_manifest_does_not_describe_is_refused(self) -> None:
+        # Nothing else can vouch for SHA256SUMS.txt: it cannot list its own digest, so the
+        # manifest's entry for it is the only check that the file shipped is the file built.
+        sums = self.dist / "SHA256SUMS.txt"
+        sums.write_text(sums.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        self.state()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not describe the SHA256SUMS.txt", result.stdout + result.stderr)
+        self.assertEqual(self.mutations(), [], self.calls())
+
+    def test_a_manifest_describing_an_asset_the_checksums_never_listed_is_refused(self) -> None:
+        # The manifest may add exactly one entry the checksum file cannot carry, its own.
+        # Anything else means it describes a release the checksums never covered.
+        manifest = json.loads((self.dist / "release-manifest.json").read_text(encoding="utf-8"))
+        manifest["assets"].append({"name": "extra.bin", "sha256": "0" * 64, "size": 1})
+        (self.dist / "release-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        self.state()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must add exactly SHA256SUMS.txt", result.stdout + result.stderr)
+        self.assertEqual(self.mutations(), [], self.calls())
 
     def test_an_asset_that_reports_no_digest_stops_before_publishing(self) -> None:
         # An asset GitHub has not finished hashing has a null digest. There is nothing to
         # compare against, so it must be refused rather than treated as a match.
         self.state(no_digest="ClaudeRestart-quiet.exe")
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(all("-X PATCH" not in call for call in self.calls()), self.calls())
 
     def test_an_annotated_tag_that_peels_to_the_built_commit_publishes(self) -> None:
         self.state(annotated_tag=True)
         result = self.run_script()
+        self.assert_ran(result)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_an_identical_published_release_is_left_alone(self) -> None:
         self.state(releases={"500": self.published_release()})
         result = self.run_script()
+        self.assert_ran(result)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.mutations(), [], "an identical release is never touched")
 
@@ -514,12 +587,14 @@ class ReleaseScriptTests(unittest.TestCase):
         changed["ClaudeRestart.exe"] = "9" * 64
         self.state(releases={"500": self.published_release(digests=changed)})
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.mutations(), [])
 
     def test_a_published_release_that_is_not_immutable_fails(self) -> None:
         self.state(releases={"500": self.published_release(immutable=False)})
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("immutable", result.stderr)
         self.assertEqual(self.mutations(), [])
@@ -531,6 +606,7 @@ class ReleaseScriptTests(unittest.TestCase):
                                 "digest": "sha256:" + "0" * 64})
         self.state(releases={"500": draft}, draft_id=500)
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("notes.txt", result.stderr)
         self.assertEqual(self.mutations(), [], "a stray file is never deleted for the user")
@@ -541,12 +617,14 @@ class ReleaseScriptTests(unittest.TestCase):
         second = dict(first, id=501)
         self.state(releases={"500": first, "501": second})
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.mutations(), [])
 
     def test_a_tag_that_moved_after_the_build_is_refused(self) -> None:
         self.state(tag_sha="2" * 40)
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("built from", result.stderr)
         self.assertEqual(self.mutations(), [], "nothing is created for a tag that moved")
@@ -554,6 +632,7 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_a_publish_that_does_not_become_immutable_is_reported(self) -> None:
         self.state(immutable_after_publish=False)
         result = self.run_script()
+        self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("immutable", result.stderr)
 

@@ -40,7 +40,9 @@ and are deliberately not matched.
 defaults leave two settings enabled that silently disable the task on a laptop
 running on battery and impose a 72-hour time limit. The registered settings are
 re-read and validated immediately after registration, including that the file the
-task runs is the very file just installed, compared by identity rather than by name.
+task runs is the very file just installed. An install from the release executables compares
+the open handles, so a link or a replaced file cannot pass; an install from source compares
+the resolved paths, because there is no installed copy to hold open.
 On any mismatch the definition that was there before is put back unchanged; when
 there was no task before, the one just registered is removed.
 
@@ -130,8 +132,10 @@ reused number from passing, but Windows offers no primitive that checks membersh
 terminates in one step. A run killed while the freeze is applied can leave the limit on
 the obsolete Job; the next run reports that and replaces it.
 
-`--scan` probes this on every Claude Job, current ones included, and reports whether the
-freeze is available, because an obsolete Job exists only while the failure is happening.
+`--scan` probes this on every Claude Job it can account for, current ones included, and reports
+whether the freeze is available, because an obsolete Job exists only while the failure is
+happening. Classification runs first, so a Job whose version is newer than the installed Claude
+stops the scan with a safety stop and no freeze line is reported for any Job.
 
 If the event matches but no exact stale Job exists, the task does **not** launch
 Claude. This prevents a different `0x80070020` cause from producing a recovery

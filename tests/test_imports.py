@@ -75,5 +75,30 @@ class ImportRuleTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
+class ModuleDutyTests(unittest.TestCase):
+    def test_the_recovery_module_holds_no_install_or_task_duties(self) -> None:
+        """The split moved installing, elevating and task registration out of recovery.
+
+        The import rules cannot see this: a function moved back would import cleanly. This
+        is what stops the module growing back into the thing the split took apart.
+        """
+        from clauderestart import recovery
+
+        moved = (
+            "install_versioned",
+            "install_from_source",
+            "remove_installation",
+            "verify_root",
+            "register_task_xml",
+            "build_task_xml",
+            "automation_task_status",
+            "relaunch_elevated",
+            "elevation_request",
+        )
+        for name in moved:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(recovery, name), f"recovery still exposes {name}")
+
+
 if __name__ == "__main__":
     unittest.main()

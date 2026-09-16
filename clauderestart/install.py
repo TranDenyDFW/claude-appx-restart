@@ -59,7 +59,10 @@ def _create_owned_dir(path: Path, backend: security.FileSecurity, reporter: Repo
     except FileExistsError as exc:
         # The identifier is random, so something else put this here. It is neither used nor
         # removed: this did not create it, and deleting another program's folder is not safe.
-        raise SafetyStop(f"{path} already exists, so nothing was installed. " + REMOVE_BY_HAND) from exc
+        raise SafetyStop(
+            f"{path} already exists, so nothing was installed. Check what created it before "
+            "removing it, then install again."
+        ) from exc
     except OSError as exc:
         raise SafetyStop(f"{path} could not be created: {exc}") from exc
     try:

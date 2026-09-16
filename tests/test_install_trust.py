@@ -156,6 +156,25 @@ class VerifyRootTests(unittest.TestCase):
         self.assertIn("Program Files", str(stop.exception))
         self.assertEqual(backend.applied, [])
 
+    @unittest.skipUnless(
+        sys.platform == "win32" and winapi.is_admin(), "creating a file symbolic link needs elevation"
+    )
+    def test_a_symbolic_link_on_a_file_in_the_root_is_refused(self) -> None:
+        """A link on a file entry, which only the per entry check can see.
+
+        The junction fixture points at a directory, and the folder check refuses that with
+        its own wording, so the per entry reparse check was never the thing that refused.
+        """
+        self.root.mkdir()
+        outside = self.base / "outside.txt"
+        outside.write_text("a file somewhere else entirely", encoding="utf-8")
+        os.symlink(outside, self.root / payload.CONSOLE_EXE_NAME)
+        backend = support.FakeFileSecurity()
+        with self.assertRaises(SafetyStop) as stop:
+            install.verify_root(self.reporter, backend, self.root)
+        self.assertIn("reparse point", str(stop.exception))
+        self.assertEqual(backend.applied, [], "nothing is repaired when a link is present")
+
     def test_a_hard_linked_file_in_the_root_is_refused(self) -> None:
         self.root.mkdir()
         original = self.root / "ClaudeRestart.exe"

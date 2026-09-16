@@ -58,6 +58,21 @@ class AcceptanceCheckerTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("tools/not_a_tool.py", problems[0])
 
+    def test_a_row_naming_a_workflow_file_that_does_not_exist_fails(self) -> None:
+        # A rename under .github went unnoticed because only tests, tools and docs were checked.
+        problems = self.checker.check(
+            self.table("| a claim | manual: enforced by .github/workflows/not-a-workflow.yml |")
+        )
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(".github/workflows/not-a-workflow.yml", problems[0])
+
+    def test_root_files_that_exist_are_accepted(self) -> None:
+        # The widened pattern must not start rejecting the root files rows legitimately name.
+        problems = self.checker.check(self.table("| a claim | manual: see not_a_module.py and build.py |"))
+        self.assertEqual(problems, [], "a root file that exists is accepted")
+        problems = self.checker.check(self.table("| a claim | manual: see ClaudeRestart.spec |"))
+        self.assertEqual(problems, [], "the spec exists")
+
     def test_a_row_that_is_not_two_columns_is_reported(self) -> None:
         problems = self.checker.check(self.table("| a claim | evidence | an extra column |"))
         self.assertTrue(any("not two columns" in problem for problem in problems), problems)

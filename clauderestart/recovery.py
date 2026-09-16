@@ -888,8 +888,12 @@ def _race_self_check(reporter: Reporter) -> tuple[int, int]:
     grew = FakeJobInspector([[101, 102], [101, 102, 103]])
     try:
         repair_stale_job(job(), 4242, quiet, grew)
-    except SafetyStop:
-        passed += int(grew.terminate_calls == 0)
+    except SafetyStop as stop:
+        # Score on which guard fired, not merely that something refused. Checking only
+        # that nothing was terminated lets a downstream refusal stand in for this one, so
+        # the guard could be deleted and the shipped self-check would still report a full
+        # pass, and the build treats that sentence as a gate.
+        passed += int(grew.terminate_calls == 0 and "gained member" in str(stop))
 
     # 2. A validated PID is replaced by the same number with a different start time.
     reused = FakeJobInspector(
@@ -905,8 +909,14 @@ def _race_self_check(reporter: Reporter) -> tuple[int, int]:
     )
     try:
         repair_stale_job(job(), 4242, quiet, reused)
-    except SafetyStop:
-        passed += int(reused.terminate_calls == 0)
+    except SafetyStop as stop:
+        # Score on which guard fired, not merely that something refused. Checking only
+        # that nothing was terminated lets a downstream refusal stand in for this one, so
+        # the guard could be deleted and the shipped self-check would still report a full
+        # pass, and the build treats that sentence as a gate.
+        passed += int(
+            reused.terminate_calls == 0 and "no longer the process that was validated" in str(stop)
+        )
 
     # 3. A member exits during validation: retry, then terminate the remaining set.
     shrank = FakeJobInspector([[101, 102], [101], [101], [101], [101], [101]])
@@ -920,8 +930,12 @@ def _race_self_check(reporter: Reporter) -> tuple[int, int]:
     late = FakeJobInspector([[101, 102], [101, 102], [101, 102, 103]])
     try:
         repair_stale_job(job(), 4242, quiet, late)
-    except SafetyStop:
-        passed += int(late.terminate_calls == 0)
+    except SafetyStop as stop:
+        # Score on which guard fired, not merely that something refused. Checking only
+        # that nothing was terminated lets a downstream refusal stand in for this one, so
+        # the guard could be deleted and the shipped self-check would still report a full
+        # pass, and the build treats that sentence as a gate.
+        passed += int(late.terminate_calls == 0 and "appeared after validation" in str(stop))
 
     # 5. A member exits after validation: retry, and the freeze is restored each time.
     exited_late = FakeJobInspector([[101, 102], [101, 102], [101], [101], [101], [101], [101], [101]])

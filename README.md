@@ -83,7 +83,7 @@ On a machine where nothing has been installed yet, it says so rather than failin
 [ROOT] not installed (C:\Program Files\ClaudeRestart is absent)
 ```
 
-`--scan` also reports, for every Claude Job it finds, whether that Job's membership could be frozen. An obsolete Job exists only while the failure is happening, so this is the way to find out beforehand that a repair would work.
+`--scan` also reports, for every Claude Job it can account for, whether that Job's membership could be frozen. An obsolete Job exists only while the failure is happening, so this is the way to find out beforehand that a repair would work. A Job whose version is newer than the installed Claude is a state the tool does not expect, and it stops the scan rather than reporting on it.
 
 Every run writes `last-run.log` next to the executable that ran, or to `%LOCALAPPDATA%\ClaudeRestart\last-run.log` when that folder is read-only. Automatic recovery therefore logs to `C:\Program Files\ClaudeRestart\versions\<version>-<id>\last-run.log`, while status and trace commands run without administrator rights log to `%LOCALAPPDATA%\ClaudeRestart\last-run.log`. When a run asks for administrator access and the elevated run never starts, the reason is written to the log rather than lost.
 

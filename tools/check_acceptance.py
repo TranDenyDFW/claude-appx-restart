@@ -22,7 +22,10 @@ TABLE_ROW = re.compile(r"^\|(?P<item>[^|]+)\|(?P<evidence>[^|]+)\|\s*$")
 TEST_REFERENCE = re.compile(r"(?P<file>tests/[A-Za-z0-9_]+\.py)(?:::(?P<test>[A-Za-z0-9_]+))?")
 # Any repository file a row names, not just a test file. A row that points at a tool which
 # was renamed or deleted reads as evidence and is worth nothing.
-FILE_REFERENCE = re.compile(r"(?P<file>(?:tests|tools|docs)/[A-Za-z0-9_./-]+\.(?:py|md|txt|yml))")
+FILE_REFERENCE = re.compile(
+    r"(?P<file>(?:\.github/|tests/|tools/|docs/)[A-Za-z0-9_./-]+\.(?:py|md|txt|yml)"
+    r"|(?<![\w/])(?:build\.py|claude_restart\.py|ClaudeRestart\.spec|README\.md))"
+)
 
 
 def known_tests(path: Path) -> set[str]:

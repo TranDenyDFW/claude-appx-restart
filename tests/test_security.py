@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support  # noqa: E402,F401
@@ -59,6 +61,21 @@ class OwnedFolderVerdictTests(unittest.TestCase):
     def test_an_inherit_only_entry_for_another_principal_is_still_blocking(self) -> None:
         # The exception is for CREATOR OWNER alone, not for inherit-only entries in general.
         report = security.verify_sddl(CANONICAL + "(A;OICIIO;GA;;;BU)")
+        self.assertFalse(report.ok)
+        self.assertTrue(report.blocking, report.problems)
+
+    def test_a_folder_with_no_permission_list_is_blocking(self) -> None:
+        # A descriptor with no list at all grants everyone everything. This is the branch
+        # that refuses it, for the root and for every file inside it.
+        report = security.verify_sddl("O:BAG:SY")
+        self.assertFalse(report.ok)
+        self.assertFalse(report.repairable)
+        self.assertTrue(any("no permission list" in problem for problem in report.blocking), report.blocking)
+
+    def test_an_object_entry_is_blocking_because_it_is_not_interpreted(self) -> None:
+        # An object entry carries GUIDs this reader does not interpret, so it is never
+        # treated as harmless, the same rule as a conditional entry.
+        report = security.verify_sddl(CANONICAL + "(OA;OICI;FA;;;BU)")
         self.assertFalse(report.ok)
         self.assertTrue(report.blocking, report.problems)
 
@@ -148,6 +165,34 @@ class ChildVerdictTests(unittest.TestCase):
         )
         self.assertFalse(report.ok)
         self.assertTrue(report.blocking, report.problems)
+
+
+@unittest.skipUnless(sys.platform == "win32", "these read a real handle")
+class FolderIdentityTests(unittest.TestCase):
+    """The two refusals scan_tree applies to a folder as an object in its own right.
+
+    Everything else it does walks the entries inside a folder, so without these the root
+    itself, and every subdirectory, is judged only by its permission list.
+    """
+
+    def problems(self, *, reparse: bool, final: str) -> list[str]:
+        stub = SimpleNamespace(
+            is_reparse_point=lambda: reparse, final_path=lambda: final, close=lambda: None
+        )
+        with mock.patch.object(security.winapi, "open_locked", return_value=stub):
+            return security._directory_write_problems(Path(r"C:\ProgramData\fixture"), support.FakeFileSecurity())
+
+    def test_a_folder_that_is_a_reparse_point_is_blocking(self) -> None:
+        problems = self.problems(reparse=True, final="")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("reparse point", problems[0])
+
+    def test_a_folder_that_does_not_resolve_to_itself_is_blocking(self) -> None:
+        # A folder reached through a path that resolves elsewhere is the one state no other
+        # check anywhere compares.
+        problems = self.problems(reparse=False, final=r"c:\somewhere\else")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("does not resolve to itself", problems[0])
 
 
 if __name__ == "__main__":
