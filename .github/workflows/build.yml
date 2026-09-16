@@ -16,6 +16,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
+    env:
+      PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@v7
 
@@ -42,7 +44,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: python build.py --check-tag "${{ github.ref_name }}"
 
-      # build.py smoke-tests both executables (--version and --self-check) before zipping.
+      # build.py builds the windowed twin, embeds its digest in the console build, then
+      # smoke-tests both executables (version, self-check with every race guard, and the
+      # embedded twin record) before zipping.
       - name: Build, smoke-test and package
         run: python build.py --no-install --skip-tests --skip-icon
 
@@ -58,6 +62,7 @@ jobs:
             dist/ClaudeRestart.exe
             dist/ClaudeRestart-quiet.exe
             dist/SHA256SUMS.txt
+            dist/release-manifest.json
 
   release:
     name: Publish GitHub Release (tags only)
@@ -75,25 +80,218 @@ jobs:
           name: ClaudeRestart-win-x64
           path: dist
 
-      - name: Create or update the release (idempotent)
+      - name: Publish the release, draft first
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          BUILT_SHA: ${{ github.sha }}
         run: |
+          # BEGIN release-script
           set -euo pipefail
-          zip=$(ls dist/ClaudeRestart-v*-win-x64.zip)
-          # A rerun after a partial failure (for example a GitHub 5xx after the release
-          # was already created) reuses the existing release and replaces its assets.
-          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
-            echo "Release $TAG already exists; replacing its assets"
-          else
-            echo "Creating release $TAG"
-            gh release create "$TAG" --verify-tag --generate-notes --title "ClaudeRestart $TAG"
+
+          repo="${GH_REPO}"
+          tag="${TAG}"
+          # Scratch files live beside the artifact, never in an absolute temp path: the
+          # shell and the interpreter must agree on where they are.
+          WORK="release-work"
+          export WORK
+          mkdir -p "$WORK"
+
+          expected_json() {
+            # The manifest and SHA256SUMS.txt must agree; the manifest additionally
+            # names SHA256SUMS.txt itself, which nothing else can vouch for.
+            python3 - "$tag" "$BUILT_SHA" <<'PY'
+          import hashlib, json, sys, pathlib
+          tag, built = sys.argv[1], sys.argv[2]
+          manifest = json.loads(pathlib.Path("dist/release-manifest.json").read_text(encoding="utf-8"))
+          if manifest.get("tag") != tag:
+              sys.exit(f"the build is for {manifest.get('tag')}, not {tag}")
+          if manifest.get("commit") not in (None, "", built):
+              sys.exit(f"the build is from commit {manifest.get('commit')}, not {built}")
+          assets = {entry["name"]: entry for entry in manifest["assets"]}
+          sums = {}
+          for line in pathlib.Path("dist/SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
+              if not line.strip():
+                  continue
+              digest, name = line.split("  ", 1)
+              sums[name.strip()] = digest.strip()
+          for name, digest in sums.items():
+              if name not in assets:
+                  sys.exit(f"SHA256SUMS.txt names {name}, which the manifest does not")
+              if assets[name]["sha256"] != digest:
+                  sys.exit(f"SHA256SUMS.txt and the manifest disagree about {name}")
+          extra = set(assets) - set(sums)
+          if extra != {"SHA256SUMS.txt"}:
+              sys.exit(f"the manifest must add exactly SHA256SUMS.txt, it adds {sorted(extra)}")
+          observed = hashlib.sha256(pathlib.Path("dist/SHA256SUMS.txt").read_bytes()).hexdigest()
+          if assets["SHA256SUMS.txt"]["sha256"] != observed:
+              sys.exit("the manifest does not describe the SHA256SUMS.txt that was built")
+          print(json.dumps(assets))
+          PY
+          }
+
+          peel_tag() {
+            local sha kind
+            sha=$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.sha')
+            kind=$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.type')
+            while [ "$kind" = "tag" ]; do
+              kind=$(gh api "repos/$repo/git/tags/$sha" --jq '.object.type')
+              sha=$(gh api "repos/$repo/git/tags/$sha" --jq '.object.sha')
+            done
+            if [ "$sha" != "$BUILT_SHA" ]; then
+              echo "The tag $tag points at $sha, but these files were built from $BUILT_SHA." >&2
+              exit 1
+            fi
+          }
+
+          find_release() {
+            # Two explicit lookups. The tag endpoint returns published releases only, so
+            # a draft answers 404 there; the list endpoint shows drafts to a token with
+            # push access. The tag is passed through the environment, never spliced into
+            # a filter expression.
+            published=$(gh api "repos/$repo/releases/tags/$tag" 2>/dev/null || true)
+            gh api "repos/$repo/releases" --paginate > "$WORK/all-releases.json"
+            drafts=$(python3 - <<'PY'
+          import json, os, pathlib
+          rows = json.loads(pathlib.Path(os.environ["WORK"], "all-releases.json").read_text(encoding="utf-8"))
+          wanted = os.environ["TAG"]
+          print("\n".join(str(row["id"]) for row in rows if row.get("draft") and row.get("tag_name") == wanted))
+          PY
+          )
+          }
+
+          load_assets() {
+            gh api "repos/$repo/releases/$1/assets" --paginate > "$WORK/assets.json"
+          }
+
+          verify_assets() {
+            load_assets "$1"
+            python3 - <<'PY'
+          import json, os, pathlib, sys
+          expected = json.loads(os.environ["EXPECTED"])
+          assets = json.loads(pathlib.Path(os.environ["WORK"], "assets.json").read_text(encoding="utf-8"))
+          names = sorted(asset["name"] for asset in assets)
+          if names != sorted(expected):
+              sys.exit(f"the release carries {names}, expected {sorted(expected)}")
+          for asset in assets:
+              want = expected[asset["name"]]
+              if asset.get("state") != "uploaded":
+                  sys.exit(f"{asset['name']} is {asset.get('state')}, not uploaded")
+              if int(asset.get("size") or 0) != int(want["size"]):
+                  sys.exit(f"{asset['name']} is {asset.get('size')} bytes, expected {want['size']}")
+              digest = (asset.get("digest") or "").replace("sha256:", "")
+              if not digest:
+                  sys.exit(f"{asset['name']} has no digest yet")
+              if digest != want["sha256"]:
+                  sys.exit(f"{asset['name']} is {digest}, expected {want['sha256']}")
+          print("every asset matches what was built")
+          PY
+          }
+
+          EXPECTED="$(expected_json)"
+          export EXPECTED
+          peel_tag
+
+          find_release
+          draft_count=$(printf '%s' "$drafts" | grep -c . || true)
+          if [ -n "$published" ] && [ "$draft_count" != "0" ]; then
+            echo "Both a published release and a draft exist for $tag; refusing to guess." >&2
+            exit 1
           fi
-          gh release upload "$TAG" --clobber \
-            "$zip#ClaudeRestart $TAG (zip: both exes, launchers, docs)" \
-            "dist/ClaudeRestart.exe#ClaudeRestart.exe (console)" \
-            "dist/ClaudeRestart-quiet.exe#ClaudeRestart-quiet.exe (windowed twin used by the scheduled task)" \
-            "dist/SHA256SUMS.txt#SHA256SUMS.txt"
-          gh release view "$TAG" --json assets --jq '.assets[].name'
+          if [ "$draft_count" -gt 1 ]; then
+            echo "More than one draft exists for $tag: $drafts" >&2
+            exit 1
+          fi
+
+          if [ -n "$published" ]; then
+            release_id=$(printf '%s' "$published" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+            immutable=$(printf '%s' "$published" | python3 -c "import json,sys; print(json.load(sys.stdin).get('immutable'))")
+            echo "Release $tag is already published; comparing it with this build."
+            verify_assets "$release_id"
+            if [ "$immutable" != "True" ] && [ "$immutable" != "true" ]; then
+              echo "Release $tag matches this build but is not immutable; enable immutable releases." >&2
+              exit 1
+            fi
+            echo "Nothing to do: the published release already carries exactly these files."
+            exit 0
+          fi
+
+          if [ "$draft_count" = "1" ]; then
+            release_id="$drafts"
+            echo "Reusing the existing draft $release_id"
+            load_assets "$release_id"
+            stray=$(python3 - <<'PY'
+          import json, os, pathlib
+          expected = set(json.loads(os.environ["EXPECTED"]))
+          assets = json.loads(pathlib.Path(os.environ["WORK"], "assets.json").read_text(encoding="utf-8"))
+          print(" ".join(sorted(a["name"] for a in assets if a["name"] not in expected)))
+          PY
+          )
+            if [ -n "$stray" ]; then
+              echo "The draft for $tag carries files this build did not produce: $stray" >&2
+              echo "Delete them, or delete the draft, then run this job again." >&2
+              exit 1
+            fi
+            for asset_id in $(python3 - <<'PY'
+          import json, os, pathlib
+          assets = json.loads(pathlib.Path(os.environ["WORK"], "assets.json").read_text(encoding="utf-8"))
+          print(" ".join(str(a["id"]) for a in assets))
+          PY
+          ); do
+              gh api -X DELETE "repos/$repo/releases/assets/$asset_id"
+            done
+          else
+            gh release create "$tag" --draft --verify-tag --generate-notes --title "ClaudeRestart $tag"
+            find_release
+            draft_count=$(printf '%s' "$drafts" | grep -c . || true)
+            if [ "$draft_count" != "1" ]; then
+              echo "Creating the draft for $tag did not produce exactly one draft." >&2
+              exit 1
+            fi
+            release_id="$drafts"
+          fi
+
+          upload_url=$(gh api "repos/$repo/releases/$release_id" --jq '.upload_url' | sed 's/{.*}//')
+          for name in $(printf '%s' "$EXPECTED" | python3 -c "import json,sys; print(' '.join(sorted(json.load(sys.stdin))))"); do
+            echo "Uploading $name"
+            curl --fail-with-body -sS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@dist/$name" \
+              "$upload_url?name=$name" > /dev/null
+            # Fail fast: a bad upload leaves the release a draft, never published.
+            load_assets "$release_id"
+            ASSET_NAME="$name" python3 - <<'PY'
+          import json, os, pathlib, sys
+          name = os.environ["ASSET_NAME"]
+          want = json.loads(os.environ["EXPECTED"])[name]
+          assets = json.loads(pathlib.Path(os.environ["WORK"], "assets.json").read_text(encoding="utf-8"))
+          for asset in assets:
+              if asset["name"] != name:
+                  continue
+              if asset.get("state") != "uploaded":
+                  sys.exit(f"{name} is {asset.get('state')} straight after upload")
+              digest = (asset.get("digest") or "").replace("sha256:", "")
+              if digest != want["sha256"]:
+                  sys.exit(f"{name} uploaded as {digest}, expected {want['sha256']}")
+              sys.exit(0)
+          sys.exit(f"{name} is not on the release after uploading it")
+          PY
+          done
+
+          verify_assets "$release_id"
+          peel_tag
+          gh api -X PATCH "repos/$repo/releases/$release_id" -F draft=false > /dev/null
+          echo "Published $tag"
+
+          published=$(gh api "repos/$repo/releases/tags/$tag")
+          verify_assets "$release_id"
+          peel_tag
+          immutable=$(printf '%s' "$published" | python3 -c "import json,sys; print(json.load(sys.stdin).get('immutable'))")
+          if [ "$immutable" != "True" ] && [ "$immutable" != "true" ]; then
+            echo "Release $tag was published but is not immutable; enable immutable releases for this repository." >&2
+            exit 1
+          fi
+          gh api "repos/$repo/releases/$release_id/assets" --jq '.[] | "\(.name) \(.size) \(.digest)"'
+          # END release-script
