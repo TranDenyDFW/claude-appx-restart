@@ -160,6 +160,10 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("wait a minute", str(stop.exception))
         self.assertEqual(tasks.registered, [])
         self.assertEqual(support.tree_hash(first), before_tree)
+        # "Nothing was changed" has to be true of the folder as well. A staged payload left
+        # behind is a change, and it is the entire release sitting in Program Files.
+        leftovers = sorted(path.name for path in install.versions_dir(self.root).iterdir())
+        self.assertEqual(leftovers, [first.name])
 
     def test_a_version_that_fails_its_final_check_is_set_aside_and_no_task_is_registered(self) -> None:
         # The verdict must pass while staging and fail after the commit, otherwise the

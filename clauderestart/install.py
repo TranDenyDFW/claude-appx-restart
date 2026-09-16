@@ -415,7 +415,13 @@ def install_versioned(
         _discard(staging)
         raise
 
-    _commit_staging(staging, final, reporter)
+    try:
+        _commit_staging(staging, final, reporter)
+    except BaseException:
+        # Otherwise the error says nothing was changed while the whole payload sits in
+        # Program Files under a staging name.
+        _discard(staging)
+        raise
     quiet = final / payload.QUIET_EXE_NAME
     locked = winapi.open_locked(quiet, open_reparse_point=True)
     try:

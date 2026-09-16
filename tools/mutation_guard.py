@@ -145,6 +145,19 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         "    elif False:",
         ("tests.test_security",),
     ),
+    (
+        "discarding the staged payload when the commit rename fails",
+        "clauderestart/install.py",
+        """    try:
+        _commit_staging(staging, final, reporter)
+    except BaseException:
+        # Otherwise the error says nothing was changed while the whole payload sits in
+        # Program Files under a staging name.
+        _discard(staging)
+        raise""",
+        "    _commit_staging(staging, final, reporter)",
+        INSTALL_TESTS,
+    ),
 ]
 
 
