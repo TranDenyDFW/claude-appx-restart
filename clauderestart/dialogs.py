@@ -96,7 +96,10 @@ class WindowsWindowBackend:
             return True
 
         if parent is None:
-            if not winapi.user32.EnumWindows(visit, 0):
+            # EnumWindows also returns FALSE, with no error set, on a desktop that has no top
+            # level windows at all. Only a failure Windows actually reports is an error.
+            ctypes.set_last_error(0)
+            if not winapi.user32.EnumWindows(visit, 0) and ctypes.get_last_error():
                 raise winapi.winerror("EnumWindows")
         else:
             # EnumChildWindows walks every descendant, not only direct children, and returns
