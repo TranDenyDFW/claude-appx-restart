@@ -100,9 +100,38 @@ class EventQueryFailureTests(unittest.TestCase):
         ),
     )
 
-    def run_with(self, query, error_id: str, category: str, message: str) -> object:
-        stand_in = support.failing_cmdlet("Get-WinEvent", ("LogName", "FilterXPath"), error_id, category, message)
-        with support.powershell_with(stand_in):
+    # (error id, category, message) as Get-WinEvent reported each on the test machine.
+    NO_EVENTS = (events.NO_EVENTS_ERROR, "ObjectNotFound", "No events were found that match the specified selection criteria.")
+    DENIED = ("System.UnauthorizedAccessException", "NotSpecified", "Attempted to perform an unauthorized operation.")
+    MISSING = ("NoMatchingLogsFound", "ObjectNotFound", "There is not an event log on the localhost computer that matches.")
+    UNREADABLE_RECORD = (
+        "System.Diagnostics.Eventing.Reader.EventLogException",
+        "NotSpecified",
+        "The description for the event could not be read.",
+    )
+
+    def stand_in(self, *, error=None, terminating: bool = False, records: int = 0, enabled: bool = True) -> str:
+        """Get-WinEvent as a function: fixture failure records, then an error, and the log's state."""
+        report = support.ps_error(*error, terminating=terminating) if error else ""
+        xml = ERROR_EVENT.replace("'", "''")
+        enabled_value = "$true" if enabled else "$false"
+        return f"""
+function Get-WinEvent {{
+    [CmdletBinding()] param([string]$LogName, [string]$FilterXPath, [string]$ListLog)
+    if ($ListLog) {{
+        return [pscustomobject]@{{ LogName = $ListLog; IsEnabled = {enabled_value} }}
+    }}
+    for ($index = 0; $index -lt {records}; $index++) {{
+        $record = [pscustomobject]@{{ RecordId = [long](233166 + $index); Id = 208; TimeCreated = Get-Date; Message = 'fixture' }}
+        $record | Add-Member -MemberType ScriptMethod -Name ToXml -Value {{ '{xml}' }}
+        $record
+    }}
+{report}
+}}
+"""
+
+    def run_with(self, query, **stand_in) -> object:
+        with support.powershell_with(self.stand_in(**stand_in)):
             try:
                 return query()
             except RecoveryError as exc:
@@ -111,45 +140,91 @@ class EventQueryFailureTests(unittest.TestCase):
     def test_a_query_that_matched_nothing_is_no_events(self) -> None:
         for label, query in self.QUERIES:
             with self.subTest(label):
-                found = self.run_with(
-                    query,
-                    events.NO_EVENTS_ERROR,
-                    "ObjectNotFound",
-                    "No events were found that match the specified selection criteria.",
-                )
-                self.assertEqual(found, [])
+                self.assertEqual(self.run_with(query, error=self.NO_EVENTS), [])
 
     def test_a_denied_log_is_an_error_not_an_empty_answer(self) -> None:
+        # A denied log throws, even when errors are only being collected.
         for label, query in self.QUERIES:
             with self.subTest(label):
-                found = self.run_with(
-                    query,
-                    "System.UnauthorizedAccessException",
-                    "NotSpecified",
-                    "Attempted to perform an unauthorized operation.",
-                )
+                found = self.run_with(query, error=self.DENIED, terminating=True)
                 self.assertIsInstance(found, RecoveryError)
                 self.assertIn("The AppModel event log could not be read", str(found))
 
     def test_a_missing_log_is_an_error_even_though_it_is_also_not_found(self) -> None:
         for label, query in self.QUERIES:
             with self.subTest(label):
-                found = self.run_with(
-                    query,
-                    "NoMatchingLogsFound",
-                    "ObjectNotFound",
-                    "There is not an event log on the localhost computer that matches.",
-                )
+                found = self.run_with(query, error=self.MISSING)
                 self.assertIsInstance(found, RecoveryError)
+                self.assertIn("The AppModel event log could not be read", str(found))
+
+    def test_a_disabled_log_is_an_error_although_nothing_matched(self) -> None:
+        for label, query in self.QUERIES:
+            with self.subTest(label):
+                found = self.run_with(query, error=self.NO_EVENTS, enabled=False)
+                self.assertIsInstance(found, RecoveryError)
+                self.assertIn("disabled", str(found))
+
+    def test_a_record_that_cannot_be_read_does_not_hide_the_ones_that_were(self) -> None:
+        for label, query in self.QUERIES:
+            with self.subTest(label):
+                found = self.run_with(query, error=self.UNREADABLE_RECORD, records=1)
+                self.assertIsInstance(found, list, found)
+                self.assertEqual(len(found), 1, found)
+
+    def test_an_error_with_nothing_read_is_an_error(self) -> None:
+        for label, query in self.QUERIES:
+            with self.subTest(label):
+                self.assertIsInstance(self.run_with(query, error=self.UNREADABLE_RECORD), RecoveryError)
+
+    def test_a_query_the_real_log_throws_on_is_an_error(self) -> None:
+        # Read only. The real cmdlet throws for a query it rejects, as it does for a denied log,
+        # so this proves a thrown failure from the real cmdlet ends as an error, not no events.
+        from clauderestart import shell
+
+        script = events._read_events_function() + "\n@(Read-AppModelEvents '*[System[') | Out-Null"
+        with self.assertRaises(RecoveryError) as stop:
+            shell.run_powershell(script)
+        self.assertIn("The AppModel event log could not be read", str(stop.exception))
 
     def test_the_real_log_is_read_without_error(self) -> None:
-        # Read only. A malformed query is an error from Windows, so this also proves the XPath
-        # both queries build is accepted by the real event log service.
+        # Read only. A malformed query throws, so this proves the event log service accepts the
+        # XPath both queries build. It cannot show that the time filter selects the right events,
+        # because a time it cannot compare simply matches nothing; the next test shows that.
         self.assertIsInstance(events.auto_recovery_events(fixture_package(), minutes=1), list)
         tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
         self.assertEqual(events.appmodel_share_violations(fixture_package(), tomorrow), [])
         long_ago = datetime(2000, 1, 1, tzinfo=timezone.utc)
         self.assertIsInstance(events.appmodel_share_violations(fixture_package(), long_ago), list)
+
+    def test_the_time_window_selects_from_the_moment_given(self) -> None:
+        # Read only, against the System log, which holds events on every Windows machine: the
+        # newest event is selected by a window starting one second before it, not one after.
+        import json
+
+        from clauderestart import shell
+
+        newest = json.loads(
+            shell.run_powershell(
+                "$e = Get-WinEvent -LogName System -MaxEvents 1 -ErrorAction Stop; "
+                "[pscustomobject]@{ RecordId = $e.RecordId; Id = $e.Id; "
+                "Utc = $e.TimeCreated.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress"
+            )
+        )
+        moment = datetime.fromisoformat(newest["Utc"])
+
+        def selected(since: datetime) -> bool:
+            xpath = shell.ps_single_quote(events.share_violation_xpath(since, event_ids=(int(newest["Id"]),)))
+            ids = json.loads(
+                shell.run_powershell(
+                    f"$ids = @(Get-WinEvent -LogName System -FilterXPath {xpath} -ErrorAction SilentlyContinue | "
+                    "ForEach-Object { $_.RecordId }); ConvertTo-Json -InputObject @($ids) -Compress"
+                )
+                or "[]"
+            )
+            return int(newest["RecordId"]) in [int(value) for value in ids]
+
+        self.assertTrue(selected(moment - timedelta(seconds=1)), newest)
+        self.assertFalse(selected(moment + timedelta(seconds=1)), newest)
 
 
 if __name__ == "__main__":

@@ -374,15 +374,29 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
     (
         "reporting an event log that could not be read as an error rather than as no events",
         "clauderestart/events.py",
-        "        if ($_.FullyQualifiedErrorId -like '{NO_EVENTS_ERROR},*') {{",
-        "        if ($true) {{",
+        "    if ($failures.Count -gt 0) {{",
+        "    if ($false) {{",
         ("tests.test_events",),
     ),
     (
         "reading only the no-events error id, not its category, as no events",
         "clauderestart/events.py",
-        "        if ($_.FullyQualifiedErrorId -like '{NO_EVENTS_ERROR},*') {{",
-        "        if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {{",
+        "$_.FullyQualifiedErrorId -notlike '{NO_EVENTS_ERROR},*'",
+        "$_.CategoryInfo.Category -ne 'ObjectNotFound'",
+        ("tests.test_events",),
+    ),
+    (
+        "reporting a disabled event log as an error rather than as no events",
+        "clauderestart/events.py",
+        "    if (-not $log.IsEnabled) {{",
+        "    if ($false) {{",
+        ("tests.test_events",),
+    ),
+    (
+        "keeping the records that were read when another record could not be",
+        "clauderestart/events.py",
+        "    if ($found.Count -gt 0) {{\n        return $found\n    }}\n",
+        "",
         ("tests.test_events",),
     ),
     (
@@ -395,8 +409,22 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
     (
         "checking that the rollback delete of a new task succeeded",
         "clauderestart/install.py",
-        "            if completed.returncode != 0:\n                detail = (completed.stderr or completed.stdout).strip()\n                raise RecoveryError(f\"schtasks could not delete it",
-        "            if False:\n                detail = (completed.stderr or completed.stdout).strip()\n                raise RecoveryError(f\"schtasks could not delete it",
+        "            if completed.returncode == 0:\n",
+        "            if True:\n",
+        ("tests.test_install_transaction",),
+    ),
+    (
+        "treating a failed delete as done only once the task is confirmed absent",
+        "clauderestart/install.py",
+        '            elif tasks.automation_task_status().get("Installed") is False:\n',
+        "            elif True:\n",
+        ("tests.test_install_transaction",),
+    ),
+    (
+        "accepting a failed delete of a task that was never registered as a completed rollback",
+        "clauderestart/install.py",
+        '            elif tasks.automation_task_status().get("Installed") is False:\n',
+        "            elif False:\n",
         ("tests.test_install_transaction",),
     ),
     (
@@ -404,6 +432,13 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         ".github/workflows/build.yml",
         '            elif grep -q "(HTTP 404)" "$WORK/published.err"; then',
         "            elif true; then",
+        ("tests.test_release_workflow",),
+    ),
+    (
+        "discarding the 404 response body so it is not read as a published release",
+        ".github/workflows/build.yml",
+        '              published=""\n',
+        "              :\n",
         ("tests.test_release_workflow",),
     ),
     (

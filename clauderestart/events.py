@@ -104,36 +104,59 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4
     return found
 
 
-def share_violation_xpath(since: datetime) -> str:
+def share_violation_xpath(since: datetime, event_ids: tuple[int, ...] = APP_ERROR_IDS) -> str:
     """Select the AppModel error events logged at or after `since`."""
     moment = since.astimezone(timezone.utc)
     stamp = moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
-    ids = " or ".join(f"EventID={event_id}" for event_id in APP_ERROR_IDS)
+    ids = " or ".join(f"EventID={event_id}" for event_id in event_ids)
     return f"*[System[({ids}) and TimeCreated[@SystemTime>='{stamp}']]]"
 
 
 def _read_events_function() -> str:
     """A PowerShell function that reads the AppModel log and fails when it cannot.
 
-    Only the error Get-WinEvent reports for a query that matched nothing means there are no
-    events. Anything else, a denied or missing log among them, exits non-zero so the caller
-    gets an error instead of an empty answer: an empty answer lets a launch report GREEN, a
-    trace report CLEAR, and an event-triggered run skip recovery, none of them having looked.
+    An empty answer lets a launch report GREEN, a trace report CLEAR, and an event-triggered
+    run skip recovery, so it is given only when the log was read and holds nothing that
+    matches. A denied log, a missing log and a disabled log each exit non-zero instead.
+
+    Get-WinEvent reports these in two ways, observed on a test machine: a denied log (and a
+    malformed query) throws, while a missing log, a query that matched nothing, and a single
+    record it could not read are written as errors. Errors are collected rather than turned
+    into exceptions so that one unreadable record does not hide the records that were read;
+    only when nothing was read does an error other than "no events matched" fail the query.
     The XPath form is used because the -FilterHashtable form reports a denied log as a query
     that matched nothing.
     """
     log_name = shell.ps_single_quote(APPMODEL_LOG)
     return f"""
 function Read-AppModelEvents([string]$XPath) {{
+    $readErrors = $null
     try {{
-        return @(Get-WinEvent -LogName {log_name} -FilterXPath $XPath -ErrorAction Stop)
+        $found = @(Get-WinEvent -LogName {log_name} -FilterXPath $XPath -ErrorAction SilentlyContinue -ErrorVariable readErrors)
     }} catch {{
-        if ($_.FullyQualifiedErrorId -like '{NO_EVENTS_ERROR},*') {{
-            return @()
-        }}
         [Console]::Error.WriteLine('The AppModel event log could not be read: ' + $_.Exception.Message)
         exit 1
     }}
+    if ($found.Count -gt 0) {{
+        return $found
+    }}
+    $failures = @($readErrors | Where-Object {{ $_.FullyQualifiedErrorId -notlike '{NO_EVENTS_ERROR},*' }})
+    if ($failures.Count -gt 0) {{
+        [Console]::Error.WriteLine('The AppModel event log could not be read: ' + $failures[0].Exception.Message)
+        exit 1
+    }}
+    # A disabled log also answers that nothing matched, which proves nothing.
+    try {{
+        $log = Get-WinEvent -ListLog {log_name} -ErrorAction Stop
+    }} catch {{
+        [Console]::Error.WriteLine('The AppModel event log could not be read: ' + $_.Exception.Message)
+        exit 1
+    }}
+    if (-not $log.IsEnabled) {{
+        [Console]::Error.WriteLine('The AppModel event log is disabled, so it cannot show whether Claude failed to start.')
+        exit 1
+    }}
+    return @()
 }}
 """
 

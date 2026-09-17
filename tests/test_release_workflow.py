@@ -225,7 +225,12 @@ if argv[:1] == ["api"]:
         for release in releases.values():
             if release["tag_name"] == os.environ["TAG"] and not release["draft"]:
                 out(release)
-        # What the real gh prints for a missing release, captured from gh itself.
+        # What the real gh prints for a missing release, captured from gh itself: the response
+        # body on stdout and the status on stderr.
+        sys.stdout.write(
+            '{"message":"Not Found","documentation_url":'
+            '"https://docs.github.com/rest/releases/releases#get-a-release-by-tag-name","status":"404"}'
+        )
         fail("gh: Not Found (HTTP 404)", 1)
     if path.endswith("/releases"):
         out(list(releases.values()))

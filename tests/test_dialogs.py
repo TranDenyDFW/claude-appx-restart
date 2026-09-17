@@ -359,6 +359,16 @@ class DismissalTests(unittest.TestCase):
         with mock.patch.object(dialogs.events, "auto_recovery_events", return_value=[{"record_id": 1}]):
             self.assertEqual(self.dismiss(logged=None), 1)
 
+    def test_an_event_log_that_cannot_be_read_leaves_the_dialog_open(self) -> None:
+        from clauderestart.errors import RecoveryError
+
+        self.desktop.add_dialog()
+        failure = RecoveryError("PowerShell query failed (1): The AppModel event log could not be read: denied")
+        with mock.patch.object(dialogs.events, "auto_recovery_events", side_effect=failure):
+            self.assertEqual(self.dismiss(logged=None), 0)
+        self.assertEqual((self.desktop.clicked, self.desktop.posted), ([], []))
+        self.assertTrue(any("could not be closed automatically" in line for line in self.lines("NOTE")))
+
     def test_a_dialog_that_appeared_after_launch_is_never_closed(self) -> None:
         before = dialogs.snapshot(package(), self.desktop)
         self.desktop.add_dialog()  # raised after the snapshot, so by a click after launch

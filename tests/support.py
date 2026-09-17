@@ -45,7 +45,32 @@ def tree_hash(root: Path) -> dict[str, str]:
     return digests
 
 
-def failing_cmdlet(name: str, parameters: tuple[str, ...], error_id: str, category: str, message: str) -> str:
+def ps_error(error_id: str, category: str, message: str, *, terminating: bool) -> str:
+    """PowerShell, inside an advanced function, that reports an error the way a cmdlet does.
+
+    Cmdlets report some failures by throwing and others by writing an error, and the two
+    reach a caller differently, so each stand-in uses the form the real cmdlet was observed
+    to use for that failure.
+    """
+    quoted = message.replace("'", "''")
+    report = "ThrowTerminatingError" if terminating else "WriteError"
+    return f"""
+    $exception = New-Object System.Exception '{quoted}'
+    $category = [System.Management.Automation.ErrorCategory]::{category}
+    $record = New-Object System.Management.Automation.ErrorRecord -ArgumentList $exception, '{error_id}', $category, $null
+    $PSCmdlet.{report}($record)
+"""
+
+
+def failing_cmdlet(
+    name: str,
+    parameters: tuple[str, ...],
+    error_id: str,
+    category: str,
+    message: str,
+    *,
+    terminating: bool = False,
+) -> str:
     """PowerShell defining a function that stands in for a cmdlet and fails the way it does.
 
     A function takes precedence over a cmdlet of the same name, so the production script
@@ -53,14 +78,10 @@ def failing_cmdlet(name: str, parameters: tuple[str, ...], error_id: str, catego
     observed to report, which is what the production script decides on.
     """
     declared = ", ".join(f"[string]${parameter}" for parameter in parameters)
-    quoted = message.replace("'", "''")
     return f"""
 function {name} {{
     [CmdletBinding()] param({declared})
-    $exception = New-Object System.Exception '{quoted}'
-    $category = [System.Management.Automation.ErrorCategory]::{category}
-    $record = New-Object System.Management.Automation.ErrorRecord -ArgumentList $exception, '{error_id}', $category, $null
-    $PSCmdlet.ThrowTerminatingError($record)
+{ps_error(error_id, category, message, terminating=terminating)}
 }}
 """
 
@@ -182,6 +203,11 @@ class FakeTaskBackend:
 
     def delete_task(self):
         self.deleted += 1
+        if self._status.get("Installed") is not True:
+            # What schtasks /Delete reports for a task that is not registered.
+            return subprocess.CompletedProcess(
+                ["schtasks.exe"], 1, stdout="", stderr="ERROR: The system cannot find the file specified."
+            )
         if self.delete_returncode != 0:
             return subprocess.CompletedProcess(
                 ["schtasks.exe"], self.delete_returncode, stdout="", stderr="ERROR: Access is denied."

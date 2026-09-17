@@ -560,10 +560,15 @@ def _restore_task(
             reporter.emit("RESTORED", "The previous automatic recovery task was put back unchanged.")
         else:
             completed = tasks.delete_task()
-            if completed.returncode != 0:
+            if completed.returncode == 0:
+                reporter.emit("RESTORED", "The task registered by this run was removed again.")
+            # schtasks also fails when there is nothing to delete, as after a registration it
+            # refused, so a failed delete is an error only while the task is still registered.
+            elif tasks.automation_task_status().get("Installed") is False:
+                reporter.emit("RESTORED", "No task from this run is left registered.")
+            else:
                 detail = (completed.stderr or completed.stdout).strip()
                 raise RecoveryError(f"schtasks could not delete it ({completed.returncode}): {detail}")
-            reporter.emit("RESTORED", "The task registered by this run was removed again.")
     except (RecoveryError, OSError) as exc:
         reporter.emit(
             "ERROR",

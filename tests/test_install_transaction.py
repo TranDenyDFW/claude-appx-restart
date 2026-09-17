@@ -317,10 +317,14 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
 
     def test_a_registration_failure_with_no_previous_task_removes_the_new_one(self) -> None:
+        # The refused registration left nothing to delete, so schtasks reports the delete failed;
+        # with no task registered, that is still a completed rollback, not an error.
         tasks = support.FakeTaskBackend(register_error=RecoveryError("schtasks refused the definition"))
         with self.assertRaises(RecoveryError):
             self.install(tasks)
         self.assertEqual(tasks.deleted, 1)
+        self.assertFalse(any(line.startswith("[ERROR]") for line in self.reporter.lines), self.reporter.lines)
+        self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
 
     def test_a_task_that_verifies_wrong_is_rolled_back(self) -> None:
         self.seed_previous_version()
@@ -399,12 +403,10 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
 
     def test_a_rollback_delete_that_fails_is_reported_not_claimed(self) -> None:
-        # schtasks reports a failed delete through its exit code, not an exception.
-        tasks = support.FakeTaskBackend(
-            register_error=RecoveryError("schtasks refused the definition"),
-            delete_returncode=1,
-        )
-        with self.assertRaises(RecoveryError):
+        # schtasks reports a failed delete through its exit code, not an exception. Here the new
+        # task was registered and checked wrong, so it is still there after the failed delete.
+        tasks = support.FakeTaskBackend(status_override={"MultipleInstances": "Parallel"}, delete_returncode=1)
+        with self.assertRaises(SafetyStop):
             self.install(tasks)
         self.assertEqual(tasks.deleted, 1)
         self.assertFalse(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
@@ -412,6 +414,24 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(len(errors), 1, self.reporter.lines)
         self.assertIn("could not be restored", errors[0])
         self.assertIn("Access is denied", errors[0])
+
+    def test_a_rollback_that_cannot_tell_whether_the_task_is_gone_is_reported_not_claimed(self) -> None:
+        tasks = support.FakeTaskBackend(register_error=RecoveryError("schtasks refused the definition"))
+        # The registration is refused, and by the time the rollback asks, Task Scheduler cannot be read.
+        original_delete = tasks.delete_task
+
+        def delete_then_lose_the_scheduler():
+            completed = original_delete()
+            tasks.status_error = RecoveryError("Task Scheduler could not be queried: Access denied")
+            return completed
+
+        tasks.delete_task = delete_then_lose_the_scheduler
+        with self.assertRaises(RecoveryError):
+            self.install(tasks)
+        self.assertFalse(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
+        errors = [line for line in self.reporter.lines if line.startswith("[ERROR]")]
+        self.assertEqual(len(errors), 1, self.reporter.lines)
+        self.assertIn("could not be queried", errors[0])
 
     def test_an_older_installer_refuses_to_replace_a_newer_version(self) -> None:
         newer = install.versions_dir(self.root)
@@ -700,6 +720,16 @@ class SourceInstallTests(unittest.TestCase):
         self.assertEqual(len(tasks.registered), 2)
         self.assertEqual(tasks.registered[-1], previous_xml, "the exact previous definition is put back")
         self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
+
+    def test_a_new_registration_that_cannot_be_checked_is_removed_when_there_was_none(self) -> None:
+        tasks = support.FakeTaskBackend(
+            status_error_after_register=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError):
+            install.install_from_source(self.reporter, package(), tasks=tasks)
+        self.assertEqual((len(tasks.registered), tasks.deleted), (1, 1))
+        self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
+        self.assertFalse(any(line.startswith("[ERROR]") for line in self.reporter.lines), self.reporter.lines)
 
 
 if __name__ == "__main__":
