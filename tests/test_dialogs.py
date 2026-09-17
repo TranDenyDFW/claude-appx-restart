@@ -252,7 +252,7 @@ class MatchRuleTests(unittest.TestCase):
     def test_a_dialog_in_another_session_is_refused(self) -> None:
         desktop = FakeWindows()
         desktop.add_dialog(pid=777)
-        self.assert_refused_for(self.only(desktop), "not in this user's session")
+        self.assert_refused_for(self.only(desktop), "not in the session this tool runs in")
 
     def test_an_owned_window_is_refused(self) -> None:
         desktop = FakeWindows()
@@ -332,6 +332,9 @@ class DismissalTests(unittest.TestCase):
         self.assertEqual((self.desktop.clicked, self.desktop.posted), ([DIALOG], []))
         self.assertTrue(self.desktop.exists(DIALOG))
         self.assertEqual(self.lines("DIALOG"), [])
+        notes = self.lines("NOTE")
+        self.assertEqual(len(notes), 1, self.reporter.lines)
+        self.assertIn("changed after TDM_CLICK_BUTTON", notes[0])
 
     def test_a_handle_reused_by_another_process_counts_as_closed(self) -> None:
         # Once a window is destroyed its handle can be reused; a live handle is not proof.

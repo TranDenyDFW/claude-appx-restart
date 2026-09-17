@@ -49,7 +49,7 @@ To upgrade, extract a newer release and run its **Install Automatic Recovery.cmd
 
 Double-click **Start Claude Safely.cmd** and approve the UAC prompt. The launcher checks for an obsolete Claude Job before opening Claude, so the error dialog should not appear.
 
-The launcher prints `GREEN` after it finds a visible Claude window and confirms that Windows recorded no new `0x80070020` errors.
+The launcher prints `GREEN` after it finds a visible Claude window and confirms that Windows recorded no new `0x80070020` errors. If the event log could not be read, it prints `VISIBLE` instead, because the window alone does not prove the error is gone.
 
 ## Remove automatic recovery
 

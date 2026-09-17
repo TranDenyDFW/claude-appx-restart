@@ -269,7 +269,7 @@ def inspect(hwnd: int, rules: Rules, backend: WindowBackend) -> Candidate:
     if backend.owner(hwnd):
         reasons.append("it belongs to another window")
     if rules.session is None or backend.session(pid) != rules.session:
-        reasons.append("it is not in this user's session")
+        reasons.append("it is not in the session this tool runs in")
     if not image or os.path.normcase(image) not in rules.allowed_owners:
         reasons.append(f"it is not shown by the Windows shell ({image or 'owner unreadable'})")
     problem = title_problem(title, rules)
@@ -410,7 +410,12 @@ def _dismiss_one(
             )
             return 1
         if not _still_the_same(window, rules, backend):
-            break
+            reporter.emit(
+                "NOTE",
+                f"The Claude error dialog 0x{window.hwnd:X} changed after {step}, so nothing more was sent "
+                "and it was left open.",
+            )
+            return 0
     reporter.emit(
         "NOTE",
         f"The Claude error dialog for {window.title} is still open (hwnd 0x{window.hwnd:X}); close it with OK.",

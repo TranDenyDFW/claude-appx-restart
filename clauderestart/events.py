@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import xml.etree.ElementTree as ET
 
@@ -15,6 +15,8 @@ APPMODEL_LOG = "Microsoft-Windows-AppModel-Runtime/Admin"
 APP_ERROR_IDS = (208, 215)
 SHARE_VIOLATION_HEX = "0x80070020"
 SHARE_VIOLATION_DECIMAL = "2147942432"
+# The error id Get-WinEvent reports for a query that matched no events, and nothing else.
+NO_EVENTS_ERROR = "NoMatchingEventsFound"
 AUTO_RECOVERY_XPATH = (
     "*[System[Provider[@Name='Microsoft-Windows-AppModel-Runtime'] and EventID=208] "
     "and EventData[Data[@Name='ApplicationName']='Claude_pzs8sxrjxfjjc!Claude' "
@@ -62,11 +64,11 @@ def auto_recovery_events(
     if minutes < 1 or minutes > 10080:
         raise RecoveryError("Trace window must be between 1 minute and 7 days.")
     xpath = shell.ps_single_quote(AUTO_RECOVERY_XPATH)
-    log_name = shell.ps_single_quote(APPMODEL_LOG)
     script = f"""
+{_read_events_function()}
 $cutoff = (Get-Date).AddMinutes(-{minutes})
 $result = @(
-    Get-WinEvent -LogName {log_name} -FilterXPath {xpath} -ErrorAction SilentlyContinue |
+    Read-AppModelEvents {xpath} |
     Where-Object TimeCreated -ge $cutoff |
     ForEach-Object {{
         [pscustomobject]@{{
@@ -102,17 +104,49 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4
     return found
 
 
-def appmodel_share_violations(package: PackageInfo, since: datetime) -> list[dict[str, object]]:
-    start = shell.ps_single_quote(since.isoformat())
-    package_name = shell.ps_single_quote(package.package_full_name)
+def share_violation_xpath(since: datetime) -> str:
+    """Select the AppModel error events logged at or after `since`."""
+    moment = since.astimezone(timezone.utc)
+    stamp = moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+    ids = " or ".join(f"EventID={event_id}" for event_id in APP_ERROR_IDS)
+    return f"*[System[({ids}) and TimeCreated[@SystemTime>='{stamp}']]]"
+
+
+def _read_events_function() -> str:
+    """A PowerShell function that reads the AppModel log and fails when it cannot.
+
+    Only the error Get-WinEvent reports for a query that matched nothing means there are no
+    events. Anything else, a denied or missing log among them, exits non-zero so the caller
+    gets an error instead of an empty answer: an empty answer lets a launch report GREEN, a
+    trace report CLEAR, and an event-triggered run skip recovery, none of them having looked.
+    The XPath form is used because the -FilterHashtable form reports a denied log as a query
+    that matched nothing.
+    """
     log_name = shell.ps_single_quote(APPMODEL_LOG)
-    event_ids = ",".join(str(event_id) for event_id in APP_ERROR_IDS)
+    return f"""
+function Read-AppModelEvents([string]$XPath) {{
+    try {{
+        return @(Get-WinEvent -LogName {log_name} -FilterXPath $XPath -ErrorAction Stop)
+    }} catch {{
+        if ($_.FullyQualifiedErrorId -like '{NO_EVENTS_ERROR},*') {{
+            return @()
+        }}
+        [Console]::Error.WriteLine('The AppModel event log could not be read: ' + $_.Exception.Message)
+        exit 1
+    }}
+}}
+"""
+
+
+def appmodel_share_violations(package: PackageInfo, since: datetime) -> list[dict[str, object]]:
+    package_name = shell.ps_single_quote(package.package_full_name)
+    xpath = shell.ps_single_quote(share_violation_xpath(since))
     newline = chr(96) + "n"  # a PowerShell escaped newline, built from parts for the shell scanners
     script = f"""
-$start = [DateTimeOffset]::Parse({start}).LocalDateTime
+{_read_events_function()}
 $package = {package_name}
 $result = @(
-    Get-WinEvent -FilterHashtable @{{LogName={log_name}; Id={event_ids}; StartTime=$start}} -ErrorAction SilentlyContinue |
+    Read-AppModelEvents {xpath} |
     ForEach-Object {{
         $text = $_.ToXml() + "{newline}" + $_.Message
         if ($text.Contains($package) -and (

@@ -45,6 +45,38 @@ def tree_hash(root: Path) -> dict[str, str]:
     return digests
 
 
+def failing_cmdlet(name: str, parameters: tuple[str, ...], error_id: str, category: str, message: str) -> str:
+    """PowerShell defining a function that stands in for a cmdlet and fails the way it does.
+
+    A function takes precedence over a cmdlet of the same name, so the production script
+    runs unchanged against it. The error id and category are the ones the real cmdlet was
+    observed to report, which is what the production script decides on.
+    """
+    declared = ", ".join(f"[string]${parameter}" for parameter in parameters)
+    quoted = message.replace("'", "''")
+    return f"""
+function {name} {{
+    [CmdletBinding()] param({declared})
+    $exception = New-Object System.Exception '{quoted}'
+    $category = [System.Management.Automation.ErrorCategory]::{category}
+    $record = New-Object System.Management.Automation.ErrorRecord -ArgumentList $exception, '{error_id}', $category, $null
+    $PSCmdlet.ThrowTerminatingError($record)
+}}
+"""
+
+
+def powershell_with(prelude: str):
+    """Run every PowerShell query for real, with `prelude` defined before the script."""
+    from clauderestart import shell
+
+    real = shell.run_powershell
+
+    def run(script: str, timeout: int = 30) -> str:
+        return real(prelude + "\n" + script, timeout)
+
+    return mock.patch.object(shell, "run_powershell", side_effect=run)
+
+
 class FakeFileSecurity:
     """A security backend that records calls and answers from a script.
 
@@ -102,11 +134,15 @@ class FakeTaskBackend:
         export_error: Exception | None = None,
         register_error: Exception | None = None,
         status_error: Exception | None = None,
+        status_error_after_register: Exception | None = None,
+        delete_returncode: int = 0,
     ) -> None:
         self._status = dict(status or {"Installed": False})
         self._xml = xml
         self.status_override = status_override
         self.status_error = status_error
+        self.status_error_after_register = status_error_after_register
+        self.delete_returncode = delete_returncode
         self.export_error = export_error
         self.register_error = register_error
         self.registered: list[str] = []
@@ -137,11 +173,19 @@ class FakeTaskBackend:
             raise error
         self._xml = xml_text
         self._status = self.status_from_xml(xml_text)
+        if self.status_error_after_register is not None:
+            # Only the lookup that verifies the new registration fails, as a query denied or
+            # timed out between the two calls would.
+            self.status_error, self.status_error_after_register = self.status_error_after_register, None
         if self.status_override:
             self._status.update(self.status_override)
 
     def delete_task(self):
         self.deleted += 1
+        if self.delete_returncode != 0:
+            return subprocess.CompletedProcess(
+                ["schtasks.exe"], self.delete_returncode, stdout="", stderr="ERROR: Access is denied."
+            )
         self._status = {"Installed": False}
         return subprocess.CompletedProcess(["schtasks.exe"], 0, stdout="", stderr="")
 

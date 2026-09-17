@@ -399,8 +399,10 @@ def install_versioned(
     if console is None:
         raise RecoveryError("internal: the running executable was not locked at startup.")
 
-    root = verify_root(reporter, backend, root)
+    # Ask Task Scheduler first: a lookup that fails then stops the install before the root is
+    # created or its permissions are repaired.
     before = tasks.automation_task_status()
+    root = verify_root(reporter, backend, root)
     had_task = before.get("Installed") is True
     previous_xml = None
     if had_task:
@@ -557,7 +559,10 @@ def _restore_task(
             tasks.register_task_xml(previous_xml)
             reporter.emit("RESTORED", "The previous automatic recovery task was put back unchanged.")
         else:
-            tasks.delete_task()
+            completed = tasks.delete_task()
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout).strip()
+                raise RecoveryError(f"schtasks could not delete it ({completed.returncode}): {detail}")
             reporter.emit("RESTORED", "The task registered by this run was removed again.")
     except (RecoveryError, OSError) as exc:
         reporter.emit(

@@ -150,6 +150,54 @@ class UnknownIdentityRunTests(unittest.TestCase):
         launch.assert_not_called()
 
 
+class EventQueryFailureRunTests(unittest.TestCase):
+    """An event log that could not be read must not pass for one that held no failure."""
+
+    def known(self) -> package_module.PackageInfo:
+        return package_module.PackageInfo(
+            "Claude",
+            "1.52386.6.0",
+            "Claude_1.52386.6.0_x64__pzs8sxrjxfjjc",
+            package_module.EXPECTED_PACKAGE_FAMILY,
+            r"C:\Program Files\WindowsApps\fixture",
+            "Claude",
+            "S-1-5-21-1111111111-2222222222-3333333333-1001",
+        )
+
+    def failure(self):
+        from clauderestart.errors import RecoveryError
+
+        return RecoveryError("PowerShell query failed (1): The AppModel event log could not be read: denied")
+
+    def test_an_event_triggered_run_reports_the_error_instead_of_no_action(self) -> None:
+        from clauderestart.errors import RecoveryError
+
+        args = cli.build_parser().parse_args(["--event-triggered", "--yes"])
+        reporter = reporting.Reporter()
+        with mock.patch.object(cli, "get_claude_package", return_value=self.known()), mock.patch.object(
+            cli.events, "auto_recovery_events", side_effect=self.failure()
+        ), mock.patch.object(cli.recovery, "get_appinfo_pid") as appinfo, mock.patch.object(
+            cli.recovery, "repair_stale_job"
+        ) as terminate, mock.patch.object(cli.recovery, "launch_and_verify") as launch:
+            with self.assertRaises(RecoveryError):
+                cli.run(args, reporter)
+        self.assertFalse(any(line.startswith("[NO ACTION]") for line in reporter.lines), reporter.lines)
+        appinfo.assert_not_called()
+        terminate.assert_not_called()
+        launch.assert_not_called()
+
+    def test_a_trace_reports_the_error_instead_of_clear(self) -> None:
+        from clauderestart.errors import RecoveryError
+
+        reporter = reporting.Reporter()
+        with mock.patch.object(cli, "get_claude_package", return_value=self.known()), mock.patch.object(
+            cli.events, "auto_recovery_events", side_effect=self.failure()
+        ):
+            with self.assertRaises(RecoveryError):
+                cli.trace_auto_recovery_events(reporter, 60)
+        self.assertFalse(any(line.startswith("[TRACE CLEAR]") for line in reporter.lines), reporter.lines)
+
+
 class RemovalQueryFailureTests(unittest.TestCase):
     def test_removal_stops_before_deleting_anything_when_the_task_cannot_be_queried(self) -> None:
         # Read as absent, removal would skip unregistering the task and then delete the files it

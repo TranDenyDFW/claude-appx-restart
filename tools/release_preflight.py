@@ -62,11 +62,14 @@ def main() -> int:
         else:
             print("Immutable releases: enabled")
 
-    code, out, _err = gh("api", f"repos/{args.repo}/releases/tags/{args.tag}")
+    code, out, err = gh("api", f"repos/{args.repo}/releases/tags/{args.tag}")
     if code == 0:
         problems.append(f"{args.tag} is already published; publish a new version instead of reusing this tag")
-    else:
+    elif "(HTTP 404)" in err:
         print(f"Tag {args.tag}: not published yet")
+    else:
+        # Only a 404 says there is no published release; a failed lookup says nothing.
+        problems.append(f"could not tell whether {args.tag} is already published ({err or 'no output'})")
 
     if problems:
         print("\nNot ready to publish:", file=sys.stderr)

@@ -159,8 +159,16 @@ jobs:
             # Two explicit lookups. The tag endpoint returns published releases only, so
             # a draft answers 404 there; the list endpoint shows drafts to a token with
             # push access. The tag is passed through the environment, never spliced into
-            # a filter expression.
-            published=$(gh api "repos/$repo/releases/tags/$tag" 2>/dev/null || true)
+            # a filter expression. Only a 404 means no published release: any other failure
+            # read as "none" would create a draft beside a release that already exists.
+            if published=$(gh api "repos/$repo/releases/tags/$tag" 2>"$WORK/published.err"); then
+              :
+            elif grep -q "(HTTP 404)" "$WORK/published.err"; then
+              published=""
+            else
+              echo "Could not tell whether $tag is already published: $(cat "$WORK/published.err")" >&2
+              exit 1
+            fi
             gh api "repos/$repo/releases" --paginate > "$WORK/all-releases.json"
             drafts=$(python3 - <<'PY'
           import json, os, pathlib

@@ -21,6 +21,8 @@ from .reporting import app_entry
 AUTO_RECOVERY_TASK_NAME = payload.TASK_NAME
 TASK_ARGUMENTS = payload.TASK_ARGUMENTS
 TASK_XML_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+# The error id Get-ScheduledTask reports for a task that does not exist, and nothing else.
+TASK_NOT_FOUND_ERROR = "CmdletizationQuery_NotFound_TaskName"
 # Registered from XML rather than schtasks switches: the switch defaults leave
 # DisallowStartIfOnBatteries/StopIfGoingOnBatteries enabled, which silently disables
 # automatic recovery on a laptop running on battery, and impose a 72-hour time limit.
@@ -102,9 +104,10 @@ try {{
     $task = Get-ScheduledTask -TaskName {task_name} -ErrorAction Stop
 }} catch {{
     # Only a lookup that found no such task means it is absent. Any other failure, such as the
-    # Task Scheduler query being denied, must not read as absent: the installer would skip
-    # capturing the previous task for rollback, and removal would skip unregistering it.
-    if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {{
+    # Task Scheduler query being denied (CimJob_BrokenCimSession), must not read as absent: the
+    # installer would skip capturing the previous task for rollback, and removal would skip
+    # unregistering it. The error id is not translated, so this holds on every display language.
+    if ($_.FullyQualifiedErrorId -like '{TASK_NOT_FOUND_ERROR},*') {{
         [pscustomobject]@{{ Installed = $false }} | ConvertTo-Json -Compress
         return
     }}

@@ -220,10 +220,13 @@ if argv[:1] == ["api"]:
         save()
         out("{}")
     if path.endswith(f"/releases/tags/{os.environ['TAG']}"):
+        if state.get("release_lookup_error"):
+            fail(state["release_lookup_error"], 1)
         for release in releases.values():
             if release["tag_name"] == os.environ["TAG"] and not release["draft"]:
                 out(release)
-        fail("not found", 1)
+        # What the real gh prints for a missing release, captured from gh itself.
+        fail("gh: Not Found (HTTP 404)", 1)
     if path.endswith("/releases"):
         out(list(releases.values()))
     if "/git/ref/tags/" in path:
@@ -589,6 +592,19 @@ class ReleaseScriptTests(unittest.TestCase):
         result = self.run_script()
         self.assert_ran(result)
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.mutations(), [])
+
+    def test_a_release_lookup_that_fails_is_not_read_as_unpublished(self) -> None:
+        # Read as unpublished, the script would create a draft beside the release that exists.
+        self.state(
+            releases={"500": self.published_release()},
+            release_lookup_error="gh: Server Error (HTTP 502)",
+        )
+        result = self.run_script()
+        self.assert_used_stand_ins(result)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not tell whether", result.stderr)
+        self.assertIn("HTTP 502", result.stderr)
         self.assertEqual(self.mutations(), [])
 
     def test_a_published_release_that_is_not_immutable_fails(self) -> None:

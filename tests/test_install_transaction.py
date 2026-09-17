@@ -365,6 +365,54 @@ class TransactionTests(unittest.TestCase):
         staging = [path for path in install.versions_dir(self.root).iterdir() if payload.STAGING_SUFFIX in path.name]
         self.assertEqual(staging, [])
 
+    def test_a_task_query_that_fails_on_a_first_install_creates_nothing(self) -> None:
+        tasks = support.FakeTaskBackend(
+            status_error=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError):
+            self.install(tasks)
+        self.assertFalse(self.root.exists(), "the root is neither created nor repaired before the lookup")
+        self.assertEqual(self.security.applied, [])
+
+    def test_a_new_registration_that_cannot_be_checked_restores_the_previous_task(self) -> None:
+        self.seed_previous_version()
+        previous_xml = "<Task>the previous definition</Task>"
+        tasks = support.FakeTaskBackend(
+            status=self.tasks.automation_task_status(),
+            xml=previous_xml,
+            status_error_after_register=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError):
+            self.install(tasks)
+        self.assertEqual(tasks.registered[-1], previous_xml, "the exact previous definition is put back")
+        self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
+        broken = [path.name for path in install.versions_dir(self.root).iterdir()]
+        self.assertTrue(any(name.endswith(payload.BROKEN_SUFFIX) for name in broken), broken)
+
+    def test_a_new_registration_that_cannot_be_checked_is_removed_when_there_was_none(self) -> None:
+        tasks = support.FakeTaskBackend(
+            status_error_after_register=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError):
+            self.install(tasks)
+        self.assertEqual(tasks.deleted, 1)
+        self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
+
+    def test_a_rollback_delete_that_fails_is_reported_not_claimed(self) -> None:
+        # schtasks reports a failed delete through its exit code, not an exception.
+        tasks = support.FakeTaskBackend(
+            register_error=RecoveryError("schtasks refused the definition"),
+            delete_returncode=1,
+        )
+        with self.assertRaises(RecoveryError):
+            self.install(tasks)
+        self.assertEqual(tasks.deleted, 1)
+        self.assertFalse(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
+        errors = [line for line in self.reporter.lines if line.startswith("[ERROR]")]
+        self.assertEqual(len(errors), 1, self.reporter.lines)
+        self.assertIn("could not be restored", errors[0])
+        self.assertIn("Access is denied", errors[0])
+
     def test_an_older_installer_refuses_to_replace_a_newer_version(self) -> None:
         newer = install.versions_dir(self.root)
         newer.mkdir(parents=True, exist_ok=True)
@@ -618,6 +666,40 @@ class StagedAndCommittedVerificationTests(unittest.TestCase):
         problems = manifest.verify(self.folder)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("does not match what was installed", problems[0])
+
+
+@unittest.skipUnless(sys.platform == "win32", "the source task runs a Windows interpreter")
+class SourceInstallTests(unittest.TestCase):
+    """Registering the task to run a checkout follows the same lookup and rollback rules."""
+
+    def setUp(self) -> None:
+        self.reporter = reporting.Reporter()
+
+    def test_a_lookup_that_fails_registers_nothing(self) -> None:
+        tasks = support.FakeTaskBackend(
+            status_error=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError):
+            install.install_from_source(self.reporter, package(), tasks=tasks)
+        self.assertEqual((tasks.registered, tasks.deleted, tasks.exported), ([], 0, 0))
+
+    def test_a_new_registration_that_cannot_be_checked_restores_the_previous_task(self) -> None:
+        previous_xml = task_module.build_task_xml(
+            Path(r"C:\Python314\pythonw.exe"),
+            '"C:\\Users\\Example\\claude_restart.py" ' + task_module.TASK_ARGUMENTS,
+            package().user_sid,
+            Path(r"C:\Users\Example"),
+        )
+        tasks = support.FakeTaskBackend(
+            status=support.FakeTaskBackend.status_from_xml(previous_xml),
+            xml=previous_xml,
+            status_error_after_register=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError):
+            install.install_from_source(self.reporter, package(), tasks=tasks)
+        self.assertEqual(len(tasks.registered), 2)
+        self.assertEqual(tasks.registered[-1], previous_xml, "the exact previous definition is put back")
+        self.assertTrue(any(line.startswith("[RESTORED]") for line in self.reporter.lines), self.reporter.lines)
 
 
 if __name__ == "__main__":

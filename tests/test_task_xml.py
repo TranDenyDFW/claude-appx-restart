@@ -231,17 +231,37 @@ class TaskQueryTests(unittest.TestCase):
                 task.automation_task_status()
         self.assertIn("could not be queried", str(stop.exception))
 
-    def test_only_a_not_found_lookup_is_mapped_to_absent(self) -> None:
-        # The script itself decides; the real failure it guards against, a denied query under a
-        # restricted token, cannot be produced in a unit test and was verified on a real machine.
-        from unittest import mock
+    def lookup_failing_with(self, error_id: str, category: str, message: str) -> object:
+        """Run the real status script with Get-ScheduledTask failing as observed on Windows."""
+        from clauderestart.errors import RecoveryError
 
-        with mock.patch.object(task.shell, "run_powershell", return_value='{"Installed":false}') as query:
-            task.automation_task_status()
-        script = query.call_args.args[0]
-        self.assertIn("-ErrorAction Stop", script)
-        self.assertIn("'ObjectNotFound'", script)
-        self.assertNotIn("SilentlyContinue\nif (-not $task)", script)
+        stand_in = support.failing_cmdlet("Get-ScheduledTask", ("TaskName",), error_id, category, message)
+        with support.powershell_with(stand_in):
+            try:
+                return task.automation_task_status()
+            except RecoveryError as exc:
+                return exc
+
+    @unittest.skipUnless(sys.platform == "win32", "runs the real status script in Windows PowerShell")
+    def test_only_a_lookup_that_found_no_task_reports_it_absent(self) -> None:
+        from clauderestart.errors import RecoveryError
+
+        # The error a lookup of a task that does not exist reports.
+        absent = self.lookup_failing_with(
+            task.TASK_NOT_FOUND_ERROR, "ObjectNotFound", "No MSFT_ScheduledTask objects found"
+        )
+        self.assertEqual(absent, {"Installed": False})
+
+        # The error the same lookup reports under a restricted token, captured on a test machine.
+        denied = self.lookup_failing_with(
+            "CimJob_BrokenCimSession", "ResourceUnavailable", "Cannot connect to CIM server. Access denied"
+        )
+        self.assertIsInstance(denied, RecoveryError)
+        self.assertIn("Task Scheduler could not be queried: Cannot connect to CIM server", str(denied))
+
+        # The category alone is not proof: another error in the same category is still an error.
+        other = self.lookup_failing_with("HRESULT 0x80041002", "ObjectNotFound", "Not found: the namespace")
+        self.assertIsInstance(other, RecoveryError)
 
 
 if __name__ == "__main__":
