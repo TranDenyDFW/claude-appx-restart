@@ -1,28 +1,44 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for claude-appx-restart.
 
-Builds two self-contained (onefile) executables from the same analysis:
+One invocation builds ONE executable, chosen by the CLAUDERESTART_BUILD_TARGET
+environment variable:
 
-- ClaudeRestart.exe        console build; used by the .cmd launchers and for manual runs
-- ClaudeRestart-quiet.exe  windowed build; registered as the scheduled task action so an
-                           automatic recovery never shows a console window (the
-                           pythonw.exe equivalent)
+- quiet    ClaudeRestart-quiet.exe  windowed build; registered as the scheduled task
+                                    action so an automatic recovery never shows a
+                                    console window (the pythonw.exe equivalent)
+- console  ClaudeRestart.exe        console build; used by the .cmd launchers and for
+                                    manual runs. It is the trust root for the windowed
+                                    twin, so it embeds that twin's SHA-256 and must be
+                                    built after it.
 
-Run: python -m PyInstaller --clean --noconfirm ClaudeRestart.spec  (or py -3 build.py)
+The stages must therefore run in order, which is what build.py does. Running this spec
+by hand is not supported and stops with a message.
+
+Run: py -3 build.py
 """
 
 import importlib.util
+import os
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH)
 SOURCE = ROOT / "claude_restart.py"
+TARGET = os.environ.get("CLAUDERESTART_BUILD_TARGET", "")
 
-# build.py owns version parsing; load it by path so the module name cannot collide.
+# build.py owns version parsing, the payload, and the twin record; load it by path so
+# the module name cannot collide.
 _build_spec = importlib.util.spec_from_file_location("claude_restart_build", ROOT / "build.py")
 _build = importlib.util.module_from_spec(_build_spec)
+# Register before executing: a by-path load leaves sys.modules empty, and anything that
+# resolves types through it (dataclasses, typing) then fails inside build.py.
+sys.modules[_build_spec.name] = _build
 _build_spec.loader.exec_module(_build)
 VERSION = _build.read_version()
+# Stops the build when the stage and the generated twin record do not match.
+TWIN_RECORD = _build.twin_record_for_target(TARGET)
 _numbers = [int(part) for part in re.findall(r"\d+", VERSION)][:4]
 VERSION_TUPLE = tuple(_numbers + [0] * (4 - len(_numbers)))
 ICON = str(ROOT / "assets" / "ClaudeRestart.ico")
@@ -68,27 +84,28 @@ pyz = PYZ(a.pure)
 
 _common = dict(debug=False, strip=False, upx=False, icon=ICON, uac_admin=False)
 
-EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="ClaudeRestart",
-    console=True,
-    version=version_file("ClaudeRestart"),
-    **_common,
-)
-
-EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="ClaudeRestart-quiet",
-    console=False,
-    disable_windowed_traceback=True,
-    version=version_file("ClaudeRestart-quiet"),
-    **_common,
-)
+if TARGET == "console":
+    EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="ClaudeRestart",
+        console=True,
+        version=version_file("ClaudeRestart"),
+        **_common,
+    )
+else:
+    EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="ClaudeRestart-quiet",
+        console=False,
+        disable_windowed_traceback=True,
+        version=version_file("ClaudeRestart-quiet"),
+        **_common,
+    )
