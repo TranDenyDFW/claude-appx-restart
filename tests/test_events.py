@@ -104,21 +104,37 @@ class EventQueryFailureTests(unittest.TestCase):
     NO_EVENTS = (events.NO_EVENTS_ERROR, "ObjectNotFound", "No events were found that match the specified selection criteria.")
     DENIED = ("System.UnauthorizedAccessException", "NotSpecified", "Attempted to perform an unauthorized operation.")
     MISSING = ("NoMatchingLogsFound", "ObjectNotFound", "There is not an event log on the localhost computer that matches.")
+    # The real reader writes a record it could not read with the exception message as the error id.
     UNREADABLE_RECORD = (
-        "System.Diagnostics.Eventing.Reader.EventLogException",
+        "The description for the event could not be read.",
         "NotSpecified",
         "The description for the event could not be read.",
     )
+    LOG_INFO_DENIED = (
+        "LogInfoUnavailable",
+        "NotSpecified",
+        "Could not retrieve information about the log. Error: Attempted to perform an unauthorized operation.",
+    )
 
-    def stand_in(self, *, error=None, terminating: bool = False, records: int = 0, enabled: bool = True) -> str:
-        """Get-WinEvent as a function: fixture failure records, then an error, and the log's state."""
+    def stand_in(
+        self,
+        *,
+        error=None,
+        terminating: bool = False,
+        records: int = 0,
+        enabled: bool = True,
+        list_log_error=None,
+    ) -> str:
+        """Get-WinEvent as a function: the log's state, fixture failure records, then an error."""
         report = support.ps_error(*error, terminating=terminating) if error else ""
+        list_log_report = support.ps_error(*list_log_error, terminating=True) if list_log_error else ""
         xml = ERROR_EVENT.replace("'", "''")
         enabled_value = "$true" if enabled else "$false"
         return f"""
 function Get-WinEvent {{
     [CmdletBinding()] param([string]$LogName, [string]$FilterXPath, [string]$ListLog)
     if ($ListLog) {{
+{list_log_report}
         return [pscustomobject]@{{ LogName = $ListLog; IsEnabled = {enabled_value} }}
     }}
     for ($index = 0; $index -lt {records}; $index++) {{
@@ -157,19 +173,36 @@ function Get-WinEvent {{
                 self.assertIsInstance(found, RecoveryError)
                 self.assertIn("The AppModel event log could not be read", str(found))
 
-    def test_a_disabled_log_is_an_error_although_nothing_matched(self) -> None:
+    def test_a_disabled_log_is_an_error_whether_or_not_it_holds_records(self) -> None:
+        # A disabled log can still hold older records that the time filter then removes, which
+        # would read as nothing new; so the state is checked before anything is read.
         for label, query in self.QUERIES:
-            with self.subTest(label):
-                found = self.run_with(query, error=self.NO_EVENTS, enabled=False)
-                self.assertIsInstance(found, RecoveryError)
-                self.assertIn("disabled", str(found))
+            for records in (0, 1):
+                with self.subTest(label, records=records):
+                    error = self.NO_EVENTS if records == 0 else None
+                    found = self.run_with(query, error=error, records=records, enabled=False)
+                    self.assertIsInstance(found, RecoveryError)
+                    self.assertIn("disabled", str(found))
 
-    def test_a_record_that_cannot_be_read_does_not_hide_the_ones_that_were(self) -> None:
+    def test_a_log_whose_state_cannot_be_read_is_an_error(self) -> None:
         for label, query in self.QUERIES:
             with self.subTest(label):
-                found = self.run_with(query, error=self.UNREADABLE_RECORD, records=1)
-                self.assertIsInstance(found, list, found)
-                self.assertEqual(len(found), 1, found)
+                found = self.run_with(query, error=self.NO_EVENTS, list_log_error=self.LOG_INFO_DENIED)
+                self.assertIsInstance(found, RecoveryError)
+                self.assertIn("Could not retrieve information about the log", str(found))
+
+    def test_a_trace_keeps_the_records_it_read_beside_one_it_could_not(self) -> None:
+        trace = self.QUERIES[0][1]
+        found = self.run_with(trace, error=self.UNREADABLE_RECORD, records=1)
+        self.assertIsInstance(found, list, found)
+        self.assertEqual(len(found), 1, found)
+
+    def test_the_post_launch_check_fails_on_any_record_it_could_not_read(self) -> None:
+        # That record might be the new failure, and GREEN must not rest on having skipped it.
+        post_launch = self.QUERIES[1][1]
+        found = self.run_with(post_launch, error=self.UNREADABLE_RECORD, records=1)
+        self.assertIsInstance(found, RecoveryError)
+        self.assertIn("The description for the event could not be read", str(found))
 
     def test_an_error_with_nothing_read_is_an_error(self) -> None:
         for label, query in self.QUERIES:
@@ -181,10 +214,12 @@ function Get-WinEvent {{
         # so this proves a thrown failure from the real cmdlet ends as an error, not no events.
         from clauderestart import shell
 
-        script = events._read_events_function() + "\n@(Read-AppModelEvents '*[System[') | Out-Null"
-        with self.assertRaises(RecoveryError) as stop:
-            shell.run_powershell(script)
-        self.assertIn("The AppModel event log could not be read", str(stop.exception))
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                script = events._read_events_function(strict=strict) + "\n@(Read-AppModelEvents '*[System[') | Out-Null"
+                with self.assertRaises(RecoveryError) as stop:
+                    shell.run_powershell(script)
+                self.assertIn("The AppModel event log could not be read", str(stop.exception))
 
     def test_the_real_log_is_read_without_error(self) -> None:
         # Read only. A malformed query throws, so this proves the event log service accepts the

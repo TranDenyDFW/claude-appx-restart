@@ -272,16 +272,35 @@ class TransactionTests(unittest.TestCase):
         first = self.seed_previous_version()
         before_tree = support.tree_hash(first)
         tasks = support.FakeTaskBackend(status=self.tasks.automation_task_status(), xml="<Task>previous</Task>")
-        with mock.patch.object(install.os, "rename", side_effect=PermissionError("in use")):
+        with mock.patch.object(install.os, "rename", side_effect=PermissionError("in use")), mock.patch.object(
+            install.time, "sleep"
+        ) as pause:
             with self.assertRaises(RecoveryError) as stop:
                 self.install(tasks)
         self.assertIn("wait a minute", str(stop.exception))
+        self.assertEqual([call.args[0] for call in pause.call_args_list], list(install.RENAME_RETRY_PAUSES))
         self.assertEqual(tasks.registered, [])
         self.assertEqual(support.tree_hash(first), before_tree)
         # "Nothing was changed" has to be true of the folder as well. A staged payload left
         # behind is a change, and it is the entire release sitting in Program Files.
         leftovers = sorted(path.name for path in install.versions_dir(self.root).iterdir())
         self.assertEqual(leftovers, [first.name])
+
+    def test_a_rename_held_up_by_a_scan_waits_and_then_succeeds(self) -> None:
+        # Retrying at once gives a scan of the new executables no time to finish.
+        real_rename = os.rename
+        outcomes = [PermissionError("in use"), PermissionError("in use")]
+
+        def rename(source, destination):
+            if outcomes and payload.STAGING_SUFFIX in str(source):
+                raise outcomes.pop(0)
+            return real_rename(source, destination)
+
+        with mock.patch.object(install.os, "rename", side_effect=rename), mock.patch.object(install.time, "sleep") as pause:
+            folder = self.install()
+        self.assertTrue(folder.is_dir())
+        self.assertEqual([call.args[0] for call in pause.call_args_list], list(install.RENAME_RETRY_PAUSES[:2]))
+        self.assertEqual(len([line for line in self.reporter.lines if line.startswith("[RETRY]")]), 2)
 
     def test_a_version_that_fails_its_final_check_is_set_aside_and_no_task_is_registered(self) -> None:
         # The verdict must pass while staging and fail after the commit, otherwise the
@@ -432,6 +451,28 @@ class TransactionTests(unittest.TestCase):
         errors = [line for line in self.reporter.lines if line.startswith("[ERROR]")]
         self.assertEqual(len(errors), 1, self.reporter.lines)
         self.assertIn("could not be queried", errors[0])
+        self.assertIn("cannot find the file specified", errors[0], "the delete's own failure is kept")
+
+    def test_a_rollback_lookup_that_times_out_is_reported_and_the_cause_is_kept(self) -> None:
+        # A timeout is not a RecoveryError. Escaping, it would replace the refusal that caused
+        # the rollback, and neither RESTORED nor ERROR would be printed.
+        import subprocess
+
+        tasks = support.FakeTaskBackend(register_error=RecoveryError("schtasks refused the definition"))
+        original_delete = tasks.delete_task
+
+        def delete_then_time_out():
+            completed = original_delete()
+            tasks.status_error = subprocess.TimeoutExpired(["powershell.exe"], 30)
+            return completed
+
+        tasks.delete_task = delete_then_time_out
+        with self.assertRaises(RecoveryError) as stop:
+            self.install(tasks)
+        self.assertIn("schtasks refused the definition", str(stop.exception))
+        errors = [line for line in self.reporter.lines if line.startswith("[ERROR]")]
+        self.assertEqual(len(errors), 1, self.reporter.lines)
+        self.assertIn("timed out", errors[0])
 
     def test_an_older_installer_refuses_to_replace_a_newer_version(self) -> None:
         newer = install.versions_dir(self.root)

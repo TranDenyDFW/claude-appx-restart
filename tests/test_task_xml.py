@@ -231,11 +231,13 @@ class TaskQueryTests(unittest.TestCase):
                 task.automation_task_status()
         self.assertIn("could not be queried", str(stop.exception))
 
-    def lookup_failing_with(self, error_id: str, category: str, message: str) -> object:
+    def lookup_failing_with(self, error_id: str, category: str, message: str, *, terminating: bool = False) -> object:
         """Run the real status script with Get-ScheduledTask failing as observed on Windows."""
         from clauderestart.errors import RecoveryError
 
-        stand_in = support.failing_cmdlet("Get-ScheduledTask", ("TaskName",), error_id, category, message)
+        stand_in = support.failing_cmdlet(
+            "Get-ScheduledTask", ("TaskName",), error_id, category, message, terminating=terminating
+        )
         with support.powershell_with(stand_in):
             try:
                 return task.automation_task_status()
@@ -252,9 +254,13 @@ class TaskQueryTests(unittest.TestCase):
         )
         self.assertEqual(absent, {"Installed": False})
 
-        # The error the same lookup reports under a restricted token, captured on a test machine.
+        # The error the same lookup reports under a restricted token, captured on a test machine,
+        # where the real cmdlet throws it rather than writing it.
         denied = self.lookup_failing_with(
-            "CimJob_BrokenCimSession", "ResourceUnavailable", "Cannot connect to CIM server. Access denied"
+            "CimJob_BrokenCimSession",
+            "ResourceUnavailable",
+            "Cannot connect to CIM server. Access denied",
+            terminating=True,
         )
         self.assertIsInstance(denied, RecoveryError)
         self.assertIn("Task Scheduler could not be queried: Cannot connect to CIM server", str(denied))

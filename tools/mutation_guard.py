@@ -416,15 +416,15 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
     (
         "treating a failed delete as done only once the task is confirmed absent",
         "clauderestart/install.py",
-        '            elif tasks.automation_task_status().get("Installed") is False:\n',
-        "            elif True:\n",
+        "            if not absent:\n                raise RecoveryError(failed)\n",
+        "            if False:\n                raise RecoveryError(failed)\n",
         ("tests.test_install_transaction",),
     ),
     (
         "accepting a failed delete of a task that was never registered as a completed rollback",
         "clauderestart/install.py",
-        '            elif tasks.automation_task_status().get("Installed") is False:\n',
-        "            elif False:\n",
+        '                absent = tasks.automation_task_status().get("Installed") is False\n',
+        "                absent = False\n",
         ("tests.test_install_transaction",),
     ),
     (

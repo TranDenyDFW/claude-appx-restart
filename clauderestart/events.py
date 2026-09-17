@@ -65,7 +65,7 @@ def auto_recovery_events(
         raise RecoveryError("Trace window must be between 1 minute and 7 days.")
     xpath = shell.ps_single_quote(AUTO_RECOVERY_XPATH)
     script = f"""
-{_read_events_function()}
+{_read_events_function(strict=False)}
 $cutoff = (Get-Date).AddMinutes(-{minutes})
 $result = @(
     Read-AppModelEvents {xpath} |
@@ -112,24 +112,41 @@ def share_violation_xpath(since: datetime, event_ids: tuple[int, ...] = APP_ERRO
     return f"*[System[({ids}) and TimeCreated[@SystemTime>='{stamp}']]]"
 
 
-def _read_events_function() -> str:
+def _read_events_function(*, strict: bool) -> str:
     """A PowerShell function that reads the AppModel log and fails when it cannot.
 
     An empty answer lets a launch report GREEN, a trace report CLEAR, and an event-triggered
     run skip recovery, so it is given only when the log was read and holds nothing that
-    matches. A denied log, a missing log and a disabled log each exit non-zero instead.
+    matches. A disabled log (checked first, because one can still hold older records), a
+    denied log and a missing log each exit non-zero instead.
 
-    Get-WinEvent reports these in two ways, observed on a test machine: a denied log (and a
-    malformed query) throws, while a missing log, a query that matched nothing, and a single
-    record it could not read are written as errors. Errors are collected rather than turned
-    into exceptions so that one unreadable record does not hide the records that were read;
-    only when nothing was read does an error other than "no events matched" fail the query.
+    Get-WinEvent reports failures in two ways, observed on a test machine: a denied log and a
+    malformed query throw, while a missing log, a query that matched nothing, and a single
+    record it could not read are written as errors.
+
+    Strict, for the check after a launch, any error other than "no events matched" fails the
+    query: a record that could not be read might be the new failure, and GREEN must not rest on
+    it. Otherwise, for a trace or a trigger, errors are collected so that one unreadable record
+    does not hide the records that were read; only when nothing was read does such an error
+    fail the query.
+
     The XPath form is used because the -FilterHashtable form reports a denied log as a query
     that matched nothing.
     """
     log_name = shell.ps_single_quote(APPMODEL_LOG)
-    return f"""
-function Read-AppModelEvents([string]$XPath) {{
+    if strict:
+        read = f"""
+    try {{
+        return @(Get-WinEvent -LogName {log_name} -FilterXPath $XPath -ErrorAction Stop)
+    }} catch {{
+        if ($_.FullyQualifiedErrorId -like '{NO_EVENTS_ERROR},*') {{
+            return @()
+        }}
+        [Console]::Error.WriteLine('The AppModel event log could not be read: ' + $_.Exception.Message)
+        exit 1
+    }}"""
+    else:
+        read = f"""
     $readErrors = $null
     try {{
         $found = @(Get-WinEvent -LogName {log_name} -FilterXPath $XPath -ErrorAction SilentlyContinue -ErrorVariable readErrors)
@@ -145,7 +162,10 @@ function Read-AppModelEvents([string]$XPath) {{
         [Console]::Error.WriteLine('The AppModel event log could not be read: ' + $failures[0].Exception.Message)
         exit 1
     }}
-    # A disabled log also answers that nothing matched, which proves nothing.
+    return @()"""
+    return f"""
+function Read-AppModelEvents([string]$XPath) {{
+    # A disabled log answers that nothing new matched, which proves nothing.
     try {{
         $log = Get-WinEvent -ListLog {log_name} -ErrorAction Stop
     }} catch {{
@@ -155,8 +175,7 @@ function Read-AppModelEvents([string]$XPath) {{
     if (-not $log.IsEnabled) {{
         [Console]::Error.WriteLine('The AppModel event log is disabled, so it cannot show whether Claude failed to start.')
         exit 1
-    }}
-    return @()
+    }}{read}
 }}
 """
 
@@ -166,7 +185,7 @@ def appmodel_share_violations(package: PackageInfo, since: datetime) -> list[dic
     xpath = shell.ps_single_quote(share_violation_xpath(since))
     newline = chr(96) + "n"  # a PowerShell escaped newline, built from parts for the shell scanners
     script = f"""
-{_read_events_function()}
+{_read_events_function(strict=True)}
 $package = {package_name}
 $result = @(
     Read-AppModelEvents {xpath} |

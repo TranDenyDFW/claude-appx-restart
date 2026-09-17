@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import time
 
 from . import __version__
 from . import package as package_module, payload, security, task as task_module, twin as twin_module, winapi
@@ -25,6 +26,8 @@ REMOVE_BY_HAND = (
     "Delete that folder by hand and install again; this installer will not change a folder "
     "another account can alter while it works."
 )
+# Seconds to wait before each further attempt to rename a staged version into place.
+RENAME_RETRY_PAUSES = (1.0, 2.0, 4.0)
 
 
 def install_dir() -> Path:
@@ -363,7 +366,8 @@ def _verify_staged(staging: Path, manifest: InstallManifest, backend: security.F
 def _commit_staging(staging: Path, final: Path, reporter: Reporter) -> None:
     """Rename the finished folder into place, retrying only a sharing conflict."""
     last: OSError | None = None
-    for attempt in range(1, 4):
+    attempts = len(RENAME_RETRY_PAUSES) + 1
+    for attempt in range(1, attempts + 1):
         try:
             os.rename(staging, final)
             return
@@ -371,9 +375,12 @@ def _commit_staging(staging: Path, final: Path, reporter: Reporter) -> None:
             last = exc
             reporter.emit(
                 "RETRY",
-                f"Could not put the new version in place yet (attempt {attempt} of 3); "
+                f"Could not put the new version in place yet (attempt {attempt} of {attempts}); "
                 "antivirus may still be reading the new files.",
             )
+            # Retrying at once gives a scan of the new executables no time to finish.
+            if attempt < attempts:
+                time.sleep(RENAME_RETRY_PAUSES[attempt - 1])
         except OSError as exc:
             last = exc
             break
@@ -562,14 +569,23 @@ def _restore_task(
             completed = tasks.delete_task()
             if completed.returncode == 0:
                 reporter.emit("RESTORED", "The task registered by this run was removed again.")
+                return
             # schtasks also fails when there is nothing to delete, as after a registration it
-            # refused, so a failed delete is an error only while the task is still registered.
-            elif tasks.automation_task_status().get("Installed") is False:
-                reporter.emit("RESTORED", "No task from this run is left registered.")
-            else:
-                detail = (completed.stderr or completed.stdout).strip()
-                raise RecoveryError(f"schtasks could not delete it ({completed.returncode}): {detail}")
-    except (RecoveryError, OSError) as exc:
+            # refused, so a failed delete is an error only while the task may still be registered.
+            failed = (
+                f"schtasks could not delete it ({completed.returncode}): "
+                f"{(completed.stderr or completed.stdout).strip()}"
+            )
+            try:
+                absent = tasks.automation_task_status().get("Installed") is False
+            except Exception as exc:  # noqa: BLE001 - reported below with the delete's own failure
+                raise RecoveryError(f"{failed}; whether it is still registered could not be checked: {exc}") from exc
+            if not absent:
+                raise RecoveryError(failed)
+            reporter.emit("RESTORED", "No task from this run is left registered.")
+    except Exception as exc:  # noqa: BLE001 - the caller re-raises the original failure after this
+        # Any failure here, a timeout included, must still be reported: escaping would replace
+        # the error that caused the rollback with one about the rollback.
         reporter.emit(
             "ERROR",
             f"The task could not be restored after {cause}: {exc}. Run Remove Automatic Recovery, then install again.",
