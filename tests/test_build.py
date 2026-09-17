@@ -291,9 +291,8 @@ class ArchiveAndManifestTests(unittest.TestCase):
     def test_the_manifest_lists_every_release_asset_with_its_digest(self) -> None:
         archive = self.dist / build.payload.release_zip_name("1.0.3")
         build.build_zip(archive, 1700000000)
-        sums = self.dist / build.payload.CHECKSUMS_NAME
-        lines = [f"{build.sha256(self.dist / name)}  {name}" for name in (*build.EXECUTABLES, archive.name)]
-        sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # Call the build's own writer: a copy of its code here could never catch a change to it.
+        sums, lines = build.write_checksums(self.dist, (*build.EXECUTABLES, archive.name))
         record = build.TwinRecord("ClaudeRestart-quiet.exe", build.sha256(self.dist / "ClaudeRestart-quiet.exe"), 1, "1.0.3")
 
         manifest_path = build.write_release_manifest(self.dist, "1.0.3", record)
@@ -308,6 +307,16 @@ class ArchiveAndManifestTests(unittest.TestCase):
             self.assertEqual(by_name[name]["sha256"], digest, name)
         self.assertEqual(by_name[build.payload.CHECKSUMS_NAME]["sha256"], build.sha256(sums))
         self.assertEqual(len(manifest["assets"]), 4)
+
+    def test_the_checksum_file_is_readable_by_sha256sum_everywhere(self) -> None:
+        # sha256sum -c on Linux or macOS reads a carriage return as part of each file name, so a
+        # checksum file with Windows line endings fails for anyone checking a download there.
+        sums, lines = build.write_checksums(self.dist, tuple(build.EXECUTABLES))
+        data = sums.read_bytes()
+        self.assertNotIn(b"\r", data)
+        self.assertEqual(data.decode("utf-8").splitlines(), lines)
+        for line in lines:
+            self.assertRegex(line, r"^[0-9a-f]{64}  [^ ]")
 
     def test_the_manifest_refuses_to_describe_a_missing_asset(self) -> None:
         record = build.TwinRecord("ClaudeRestart-quiet.exe", "a" * 64, 1, "1.0.3")

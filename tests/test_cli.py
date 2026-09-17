@@ -150,5 +150,33 @@ class UnknownIdentityRunTests(unittest.TestCase):
         launch.assert_not_called()
 
 
+class RemovalQueryFailureTests(unittest.TestCase):
+    def test_removal_stops_before_deleting_anything_when_the_task_cannot_be_queried(self) -> None:
+        # Read as absent, removal would skip unregistering the task and then delete the files it
+        # runs, leaving a registered task pointing at nothing.
+        from clauderestart.errors import RecoveryError
+
+        failure = RecoveryError("PowerShell query failed (1): Task Scheduler could not be queried: Access denied")
+        with support.frozen_at(Path(r"C:\Program Files\ClaudeRestart\versions\1.0.3-abc\ClaudeRestart.exe")), mock.patch.object(
+            cli.task, "automation_task_status", side_effect=failure
+        ), mock.patch.object(cli.task, "delete_task") as delete, mock.patch.object(
+            cli.install, "remove_installation"
+        ) as remove_files:
+            with self.assertRaises(RecoveryError):
+                cli.remove_auto_recovery(reporting.Reporter())
+        delete.assert_not_called()
+        remove_files.assert_not_called()
+
+    def test_status_reports_a_failed_query_as_an_error_not_as_absent(self) -> None:
+        from clauderestart.errors import RecoveryError
+
+        failure = RecoveryError("PowerShell query failed (1): Task Scheduler could not be queried: Access denied")
+        reporter = reporting.Reporter()
+        with mock.patch.object(cli.task, "automation_task_status", side_effect=failure):
+            with self.assertRaises(RecoveryError):
+                cli.show_auto_recovery_status(reporter)
+        self.assertFalse(any("NOT INSTALLED" in line for line in reporter.lines), reporter.lines)
+
+
 if __name__ == "__main__":
     unittest.main()

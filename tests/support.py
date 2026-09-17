@@ -101,10 +101,12 @@ class FakeTaskBackend:
         status_override: dict[str, object] | None = None,
         export_error: Exception | None = None,
         register_error: Exception | None = None,
+        status_error: Exception | None = None,
     ) -> None:
         self._status = dict(status or {"Installed": False})
         self._xml = xml
         self.status_override = status_override
+        self.status_error = status_error
         self.export_error = export_error
         self.register_error = register_error
         self.registered: list[str] = []
@@ -116,6 +118,8 @@ class FakeTaskBackend:
         return len(self.registered) + self.deleted
 
     def automation_task_status(self) -> dict[str, object]:
+        if self.status_error is not None:
+            raise self.status_error
         return dict(self._status)
 
     def export_task_xml(self) -> str:

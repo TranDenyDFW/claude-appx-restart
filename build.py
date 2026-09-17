@@ -231,6 +231,18 @@ def build_zip(archive: Path, timestamp: int) -> None:
             bundle.writestr(info, source_file.read_bytes())
 
 
+def write_checksums(dist: Path, names: tuple[str, ...]) -> tuple[Path, list[str]]:
+    """Write SHA256SUMS.txt with Unix line endings, the format sha256sum -c reads everywhere.
+
+    Written in text mode on Windows without a newline argument, every line would end in a
+    carriage return, and sha256sum -c on Linux or macOS reads that as part of each file name.
+    """
+    lines = [f"{sha256(dist / name)}  {name}" for name in names]
+    target = dist / payload.CHECKSUMS_NAME
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return target, lines
+
+
 def write_release_manifest(dist: Path, version: str, record: TwinRecord) -> Path:
     """Record every asset a release must carry, with its digest, size, and commit.
 
@@ -349,9 +361,7 @@ def main() -> int:
     archive = DIST / payload.release_zip_name(current)
     build_zip(archive, source_date_epoch())
 
-    checksums = DIST / payload.CHECKSUMS_NAME
-    lines = [f"{sha256(DIST / name)}  {name}" for name in (*EXECUTABLES, archive.name)]
-    checksums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _checksums, lines = write_checksums(DIST, (*EXECUTABLES, archive.name))
     manifest = write_release_manifest(DIST, current, record)
     print("\n".join(lines))
     print(f"\nBuilt {archive}")

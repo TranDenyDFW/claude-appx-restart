@@ -208,5 +208,41 @@ class RegisteredTaskVerificationTests(unittest.TestCase):
         self.assertIn("does not name the sharing violation", self.verify(Subscription=naming_app)[0])
 
 
+class TaskQueryTests(unittest.TestCase):
+    """Absent and unreadable are different answers, and only absent may read as not installed."""
+
+    @unittest.skipUnless(sys.platform == "win32", "Task Scheduler is Windows only")
+    def test_a_task_that_does_not_exist_is_reported_absent_not_as_an_error(self) -> None:
+        # Real Task Scheduler, read only: a lookup that finds nothing must still say "absent",
+        # so treating other failures as errors does not turn a clean machine into an error.
+        import secrets
+
+        status = task.automation_task_status(f"ClaudeRestart-Absent-{secrets.token_hex(8)}")
+        self.assertEqual(status, {"Installed": False})
+
+    def test_a_query_that_fails_raises_instead_of_reporting_absent(self) -> None:
+        from unittest import mock
+
+        from clauderestart.errors import RecoveryError
+
+        failure = RecoveryError("PowerShell query failed (1): Task Scheduler could not be queried: Access denied")
+        with mock.patch.object(task.shell, "run_powershell", side_effect=failure):
+            with self.assertRaises(RecoveryError) as stop:
+                task.automation_task_status()
+        self.assertIn("could not be queried", str(stop.exception))
+
+    def test_only_a_not_found_lookup_is_mapped_to_absent(self) -> None:
+        # The script itself decides; the real failure it guards against, a denied query under a
+        # restricted token, cannot be produced in a unit test and was verified on a real machine.
+        from unittest import mock
+
+        with mock.patch.object(task.shell, "run_powershell", return_value='{"Installed":false}') as query:
+            task.automation_task_status()
+        script = query.call_args.args[0]
+        self.assertIn("-ErrorAction Stop", script)
+        self.assertIn("'ObjectNotFound'", script)
+        self.assertNotIn("SilentlyContinue\nif (-not $task)", script)
+
+
 if __name__ == "__main__":
     unittest.main()

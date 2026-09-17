@@ -349,6 +349,22 @@ class TransactionTests(unittest.TestCase):
         staging = [path for path in install.versions_dir(self.root).iterdir() if payload.STAGING_SUFFIX in path.name]
         self.assertEqual(staging, [])
 
+    def test_a_task_query_that_fails_stops_before_anything_is_staged(self) -> None:
+        # A failed query is not an absent task. Read as absent, the installer would skip
+        # capturing the previous task, and a failed registration could then only delete it.
+        first = self.seed_previous_version()
+        before_tree = support.tree_hash(first)
+        tasks = support.FakeTaskBackend(
+            status_error=RecoveryError("Task Scheduler could not be queried: Access denied"),
+        )
+        with self.assertRaises(RecoveryError) as stop:
+            self.install(tasks)
+        self.assertIn("could not be queried", str(stop.exception))
+        self.assertEqual((tasks.registered, tasks.deleted, tasks.exported), ([], 0, 0))
+        self.assertEqual(support.tree_hash(first), before_tree)
+        staging = [path for path in install.versions_dir(self.root).iterdir() if payload.STAGING_SUFFIX in path.name]
+        self.assertEqual(staging, [])
+
     def test_an_older_installer_refuses_to_replace_a_newer_version(self) -> None:
         newer = install.versions_dir(self.root)
         newer.mkdir(parents=True, exist_ok=True)

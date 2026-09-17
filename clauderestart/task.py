@@ -98,10 +98,18 @@ def task_launcher() -> tuple[Path, str]:
 def automation_task_status(name: str = AUTO_RECOVERY_TASK_NAME) -> dict[str, object]:
     task_name = shell.ps_single_quote(name)
     script = f"""
-$task = Get-ScheduledTask -TaskName {task_name} -ErrorAction SilentlyContinue
-if (-not $task) {{
-    [pscustomobject]@{{ Installed = $false }} | ConvertTo-Json -Compress
-    return
+try {{
+    $task = Get-ScheduledTask -TaskName {task_name} -ErrorAction Stop
+}} catch {{
+    # Only a lookup that found no such task means it is absent. Any other failure, such as the
+    # Task Scheduler query being denied, must not read as absent: the installer would skip
+    # capturing the previous task for rollback, and removal would skip unregistering it.
+    if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {{
+        [pscustomobject]@{{ Installed = $false }} | ConvertTo-Json -Compress
+        return
+    }}
+    [Console]::Error.WriteLine('Task Scheduler could not be queried: ' + $_.Exception.Message)
+    exit 1
 }}
 $info = Get-ScheduledTaskInfo -TaskName {task_name} -ErrorAction SilentlyContinue
 $trigger = @($task.Triggers)[0]
