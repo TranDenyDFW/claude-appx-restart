@@ -67,6 +67,7 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | Ambiguous release state is refused rather than guessed | tests/test_release_workflow.py::test_two_drafts_for_one_tag_are_refused, tests/test_release_workflow.py::test_a_draft_holding_an_unexpected_file_is_refused |
 | Immutability is required, not assumed | tests/test_release_workflow.py::test_a_published_release_that_is_not_immutable_fails, tests/test_release_workflow.py::test_a_publish_that_does_not_become_immutable_is_reported |
 | An independent download matches the published digests | tests/test_verify_release.py::test_a_release_that_matches_reports_no_problems, tests/test_verify_release.py::test_a_tampered_checksums_file_cannot_vouch_for_the_executables, manual gate item 8 |
+| The published checksum file is readable by sha256sum on any platform | tests/test_build.py::test_the_checksum_file_is_readable_by_sha256sum_everywhere |
 
 ## P2 Make install and upgrade transactional
 
@@ -80,6 +81,9 @@ test on this machine can provide; they are listed in the plan's manual gate.
 | A successful upgrade leaves one verified task action and one immutable version folder | tests/test_install_transaction.py::test_a_clean_install_produces_one_verified_version_and_one_task |
 | Upgrading from the currently registered source-based task | tests/test_install_transaction.py::test_an_upgrade_from_a_source_task_registers_the_versioned_executable, tests/test_install_transaction.py::test_a_forced_failure_restores_the_exact_source_task_definition, manual gate item 3 |
 | The executable a live task refers to is never overwritten | tests/test_install_transaction.py::test_an_older_installer_refuses_to_replace_a_newer_version, tests/test_install_transaction.py::test_an_upgrade_from_the_flat_layout_removes_the_old_files |
+| A task lookup that fails is an error, never an absent task, so install, removal and status stop before changing anything | tests/test_install_transaction.py::test_a_task_query_that_fails_stops_before_anything_is_staged, tests/test_cli.py::test_removal_stops_before_deleting_anything_when_the_task_cannot_be_queried, tests/test_cli.py::test_status_reports_a_failed_query_as_an_error_not_as_absent, tests/test_task_xml.py::test_a_query_that_fails_raises_instead_of_reporting_absent, tests/test_task_xml.py::test_only_a_not_found_lookup_is_mapped_to_absent |
+| A task that does not exist is still reported absent by the real Task Scheduler | tests/test_task_xml.py::test_a_task_that_does_not_exist_is_reported_absent_not_as_an_error |
+| A lookup denied under a restricted token is reported as an error | manual: on a test machine, `--automation-status` run through `runas /trustlevel:0x20000` against an installed task, where Get-ScheduledTask fails with "Cannot connect to CIM server. Access denied" |
 
 ## P2 Fail closed when the Claude application ID is unknown
 

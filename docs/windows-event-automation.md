@@ -191,12 +191,13 @@ stays open after recovery has fixed the cause, so recovery closes it, under thes
    `0x80070020` event. A VISIBLE result could not check for new events, so it closes nothing.
 3. Windows must have logged Event 208 with `0x80070020` for this package in the last ten
    minutes, so the dialog is tied to the failure that was fixed.
-4. Each dialog must still be the same window, owned by the same process, with the same title.
-5. It must be a visible, unowned `#32770` window in this user's session, owned by exactly
+4. Each dialog must still be the same window, owned by the same process, with the same title,
+   checked again before each message is sent.
+5. It must be a visible, unowned `#32770` window in the session this tool runs in, owned by exactly
    `System32\sihost.exe` or `explorer.exe` in the Windows folder the shell reports.
 6. Its title must be a path under the folder Claude is installed in, naming a folder of this
    package family (any version) and the application's executable from the manifest.
-7. It must be a task dialog, with a `DirectUIHWND` surface and an enabled button. The message
+7. It must be a task dialog, with a `DirectUIHWND` surface and a visible, enabled button. The message
    used to press the button has the same number as a property sheet's page removal, so it is
    never sent to anything else.
 

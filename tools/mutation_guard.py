@@ -350,6 +350,27 @@ MUTATIONS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
         '            winapi.WM_CLOSE,\n',
         ("tests.test_dialogs_windows",),
     ),
+    (
+        "checking the dialog again before WM_CLOSE is sent",
+        'clauderestart/dialogs.py',
+        '            return 1\n        if not _still_the_same(window, rules, backend):\n            break\n',
+        '            return 1\n',
+        ("tests.test_dialogs",),
+    ),
+    (
+        "reporting a task lookup that failed as an error rather than as an absent task",
+        "clauderestart/task.py",
+        "    if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {{",
+        "    if ($true) {{",
+        ("tests.test_task_xml",),
+    ),
+    (
+        "writing the checksum file with Unix line endings",
+        "build.py",
+        '    target.write_text("\\n".join(lines) + "\\n", encoding="utf-8", newline="\\n")',
+        '    target.write_text("\\n".join(lines) + "\\n", encoding="utf-8")',
+        ("tests.test_build",),
+    ),
 ]
 
 

@@ -154,6 +154,8 @@ class FakeWindows:
             self.remove(hwnd)
         elif behaviour == "reuse" and hwnd in self.windows:
             self.windows[hwnd]["pid"] = 99999
+        elif behaviour == "retitle" and hwnd in self.windows:
+            self.windows[hwnd]["title"] = INSTALL + r"\app\helper.exe"
 
     def click_ok(self, hwnd: int) -> bool:
         if self.raise_on_click is not None:
@@ -318,6 +320,17 @@ class DismissalTests(unittest.TestCase):
         self.assertEqual(self.dismiss(), 0)
         self.assertTrue(self.desktop.exists(DIALOG))
         self.assertTrue(any("still open" in line for line in self.lines("NOTE")), self.reporter.lines)
+        self.assertEqual(self.lines("DIALOG"), [])
+
+    def test_a_dialog_that_changes_after_the_button_press_gets_no_wm_close(self) -> None:
+        # The same process can reuse the window for something else; it is checked again before
+        # the second message, so WM_CLOSE never reaches a window that no longer matches.
+        self.desktop.add_dialog()
+        self.desktop.on_click[DIALOG] = "retitle"
+        self.desktop.on_close[DIALOG] = "close"
+        self.assertEqual(self.dismiss(), 0)
+        self.assertEqual((self.desktop.clicked, self.desktop.posted), ([DIALOG], []))
+        self.assertTrue(self.desktop.exists(DIALOG))
         self.assertEqual(self.lines("DIALOG"), [])
 
     def test_a_handle_reused_by_another_process_counts_as_closed(self) -> None:
